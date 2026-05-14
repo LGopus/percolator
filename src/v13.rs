@@ -424,7 +424,6 @@ pub struct TradeRequestV13 {
     pub size_q: u128,
     pub exec_price: u64,
     pub fee_bps: u64,
-    pub allow_risk_increase_under_locks: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1387,7 +1386,7 @@ impl MarketGroupV13 {
         {
             return Err(V13Error::InvalidConfig);
         }
-        if self.mode != MarketModeV13::Live || self.loss_stale_active {
+        if self.mode != MarketModeV13::Live {
             return Err(V13Error::LockActive);
         }
         self.settle_account_side_effects_not_atomic(
@@ -1401,9 +1400,17 @@ impl MarketGroupV13 {
         self.full_account_refresh(long_account, effective_prices)?;
         self.full_account_refresh(short_account, effective_prices)?;
 
+        let long_delta =
+            i128::try_from(request.size_q).map_err(|_| V13Error::ArithmeticOverflow)?;
+        let short_delta = long_delta
+            .checked_neg()
+            .ok_or(V13Error::ArithmeticOverflow)?;
         let locked = self.h_lock_lane(Some(long_account), false)? == HLockLaneV13::HMax
             || self.h_lock_lane(Some(short_account), false)? == HLockLaneV13::HMax;
-        if locked && request.allow_risk_increase_under_locks {
+        let risk_increasing =
+            position_delta_increases_risk(long_account, request.asset_index, long_delta)?
+                || position_delta_increases_risk(short_account, request.asset_index, short_delta)?;
+        if locked && risk_increasing {
             return Err(V13Error::LockActive);
         }
 
@@ -1411,14 +1418,14 @@ impl MarketGroupV13 {
         let fee = checked_fee_bps(notional, request.fee_bps)?;
         self.charge_account_fee_not_atomic(long_account, fee)?;
         self.charge_account_fee_not_atomic(short_account, fee)?;
-        self.apply_position_delta(long_account, request.asset_index, request.size_q as i128)?;
-        let short_delta = i128::try_from(request.size_q)
-            .map_err(|_| V13Error::ArithmeticOverflow)?
-            .checked_neg()
-            .ok_or(V13Error::ArithmeticOverflow)?;
+        self.apply_position_delta(long_account, request.asset_index, long_delta)?;
         self.apply_position_delta(short_account, request.asset_index, short_delta)?;
         self.full_account_refresh(long_account, effective_prices)?;
         self.full_account_refresh(short_account, effective_prices)?;
+        if locked {
+            ensure_no_positive_credit_initial_margin(long_account)?;
+            ensure_no_positive_credit_initial_margin(short_account)?;
+        }
         self.assert_public_invariants()?;
         Ok(TradeOutcomeV13 {
             fee_a: fee,
@@ -2295,6 +2302,26 @@ pub fn account_equity(account: &PortfolioAccountV13) -> V13Result<i128> {
         .ok_or(V13Error::ArithmeticOverflow)
 }
 
+fn account_no_positive_credit_equity(account: &PortfolioAccountV13) -> V13Result<i128> {
+    validate_non_min_i128(account.pnl)?;
+    validate_fee_credits(account.fee_credits)?;
+    let capital = i128::try_from(account.capital).map_err(|_| V13Error::ArithmeticOverflow)?;
+    let fee_debt =
+        i128::try_from(fee_debt_u128(account)?).map_err(|_| V13Error::ArithmeticOverflow)?;
+    capital
+        .checked_add(account.pnl.min(0))
+        .and_then(|v| v.checked_sub(fee_debt))
+        .ok_or(V13Error::ArithmeticOverflow)
+}
+
+fn ensure_no_positive_credit_initial_margin(account: &PortfolioAccountV13) -> V13Result<()> {
+    let equity = account_no_positive_credit_equity(account)?;
+    if equity < 0 || (equity as u128) < account.health_cert.certified_initial_req {
+        return Err(V13Error::LockActive);
+    }
+    Ok(())
+}
+
 fn account_equity_with_capital(
     account: &PortfolioAccountV13,
     capital_override: u128,
@@ -2308,6 +2335,19 @@ fn account_equity_with_capital(
         .checked_add(account.pnl)
         .and_then(|v| v.checked_sub(fee_debt))
         .ok_or(V13Error::ArithmeticOverflow)
+}
+
+fn position_delta_increases_risk(
+    account: &PortfolioAccountV13,
+    asset_index: usize,
+    delta_q: i128,
+) -> V13Result<bool> {
+    let current = signed_position(account.legs[asset_index]);
+    let next = current
+        .checked_add(delta_q)
+        .ok_or(V13Error::ArithmeticOverflow)?;
+    validate_basis_or_zero(next)?;
+    Ok(next.unsigned_abs() > current.unsigned_abs())
 }
 
 fn margin_requirement(notional: u128, bps: u64, floor: u128) -> V13Result<u128> {

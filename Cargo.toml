@@ -19,8 +19,6 @@ default = []
 test = []  # Enable test-only harness configuration
 stress = []  # Reserved for stress/audit harnesses
 fuzz = ["test"]  # Enable fuzzing tests (includes test feature for test_visible helpers)
-small = []  # Low-traffic deployment profile hook
-medium = []  # Mid-range deployment profile hook
 audit-scan = []  # Enable full account-table invariant scans on public exits
 
 [profile.release]

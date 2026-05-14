@@ -404,13 +404,79 @@ fn proof_v13_trade_dynamic_fee_cap_is_enforced_before_mutation() {
             size_q: 1,
             exec_price: 1,
             fee_bps: 2,
-            allow_risk_increase_under_locks: false,
         },
         &[1; V13_MAX_PORTFOLIO_ASSETS_N],
     );
     assert_eq!(result, Err(V13Error::InvalidConfig));
     assert_eq!(long.active_bitmap, 0);
     assert_eq!(short.active_bitmap, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_hlock_rejects_risk_increasing_trade_before_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut short = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    group.deposit_not_atomic(&mut long, 10).unwrap();
+    group.deposit_not_atomic(&mut short, 10).unwrap();
+    group.threshold_stress_active = true;
+
+    let result = group.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: 1,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(result, Err(V13Error::LockActive));
+    assert_eq!(long.active_bitmap, 0);
+    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(group.insurance, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v13_hlock_allows_pure_risk_reducing_trade_with_principal_margin() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut reducing_short =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut reducing_long =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    group.deposit_not_atomic(&mut reducing_short, 100).unwrap();
+    group.deposit_not_atomic(&mut reducing_long, 100).unwrap();
+    group
+        .attach_leg(&mut reducing_short, 0, SideV13::Short, -10)
+        .unwrap();
+    group
+        .attach_leg(&mut reducing_long, 0, SideV13::Long, 10)
+        .unwrap();
+    group.threshold_stress_active = true;
+
+    let result = group.execute_trade_with_fee_not_atomic(
+        &mut reducing_short,
+        &mut reducing_long,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: 5,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(reducing_short.legs[0].basis_pos_q, -5);
+    assert_eq!(reducing_long.legs[0].basis_pos_q, 5);
 }
 
 #[kani::proof]

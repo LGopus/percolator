@@ -108,8 +108,6 @@ longer applies to the architecture.
 ```bash
 cargo test
 cargo test --features test
-cargo test --features small
-cargo test --features medium
 ```
 
 ## Scope

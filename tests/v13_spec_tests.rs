@@ -366,7 +366,6 @@ fn v13_trade_fee_is_dynamic_bounded_and_charged_inside_engine() {
         size_q: POS_SCALE,
         exec_price: 1_000,
         fee_bps: 50,
-        allow_risk_increase_under_locks: false,
     };
     let out = g
         .execute_trade_with_fee_not_atomic(
@@ -393,6 +392,132 @@ fn v13_trade_fee_is_dynamic_bounded_and_charged_inside_engine() {
         ),
         Err(V13Error::InvalidConfig)
     );
+}
+
+#[test]
+fn v13_hlock_blocks_risk_increasing_trade_before_fee_or_position_mutation() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+    g.deposit_not_atomic(&mut long, 10_000).unwrap();
+    g.deposit_not_atomic(&mut short, 10_000).unwrap();
+    g.threshold_stress_active = true;
+
+    let res = g.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V13Error::LockActive));
+    assert_eq!(long.active_bitmap, 0);
+    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(g.insurance, 0);
+}
+
+#[test]
+fn v13_hlock_allows_pure_risk_reducing_trade_with_no_positive_credit_margin() {
+    let mut g = group();
+    let mut reducing_short = account();
+    let mut reducing_long = account();
+    reducing_long.provenance_header.portfolio_account_id = [4; 32];
+    g.deposit_not_atomic(&mut reducing_short, 10_000).unwrap();
+    g.deposit_not_atomic(&mut reducing_long, 10_000).unwrap();
+    g.attach_leg(&mut reducing_short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut reducing_long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.threshold_stress_active = true;
+
+    let out = g
+        .execute_trade_with_fee_not_atomic(
+            &mut reducing_short,
+            &mut reducing_long,
+            TradeRequestV13 {
+                asset_index: 0,
+                size_q: POS_SCALE / 2,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.notional, 50);
+    assert_eq!(
+        reducing_short.legs[0].basis_pos_q.unsigned_abs(),
+        POS_SCALE / 2
+    );
+    assert_eq!(
+        reducing_long.legs[0].basis_pos_q.unsigned_abs(),
+        POS_SCALE / 2
+    );
+}
+
+#[test]
+fn v13_hlock_rejects_reducing_trade_that_needs_positive_pnl_credit() {
+    let mut g = group();
+    let mut weak_short = account();
+    let mut strong_long = account();
+    strong_long.provenance_header.portfolio_account_id = [4; 32];
+    weak_short.pnl = 100;
+    g.pnl_pos_tot = 100;
+    g.deposit_not_atomic(&mut strong_long, 10_000).unwrap();
+    g.attach_leg(&mut weak_short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut strong_long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.threshold_stress_active = true;
+
+    let res = g.execute_trade_with_fee_not_atomic(
+        &mut weak_short,
+        &mut strong_long,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: POS_SCALE / 2,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V13Error::LockActive));
+}
+
+#[test]
+fn v13_loss_stale_allows_pure_risk_reducing_trade_path() {
+    let mut g = group();
+    let mut reducing_short = account();
+    let mut reducing_long = account();
+    reducing_long.provenance_header.portfolio_account_id = [4; 32];
+    g.deposit_not_atomic(&mut reducing_short, 10_000).unwrap();
+    g.deposit_not_atomic(&mut reducing_long, 10_000).unwrap();
+    g.attach_leg(&mut reducing_short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut reducing_long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.loss_stale_active = true;
+
+    assert!(g
+        .execute_trade_with_fee_not_atomic(
+            &mut reducing_short,
+            &mut reducing_long,
+            TradeRequestV13 {
+                asset_index: 0,
+                size_q: POS_SCALE / 2,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .is_ok());
 }
 
 #[test]
