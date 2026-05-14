@@ -113,6 +113,36 @@ fn v13_stale_and_b_stale_counters_are_exact_and_idempotent() {
 }
 
 #[test]
+fn v13_full_refresh_clears_stale_certificate_but_not_b_stale_loss() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.full_account_refresh(&mut a, &[100; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    g.mark_account_stale(&mut a).unwrap();
+    assert_eq!(g.stale_certificate_count, 1);
+    assert_eq!(
+        g.ensure_favorable_action_allowed(&a),
+        Err(V13Error::LockActive)
+    );
+
+    g.full_account_refresh(&mut a, &[100; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(g.stale_certificate_count, 0);
+    assert!(!a.stale_state);
+    assert_eq!(g.ensure_favorable_action_allowed(&a), Ok(()));
+
+    g.assets[0].b_long_num = SOCIAL_LOSS_DEN;
+    assert_eq!(
+        g.full_account_refresh(&mut a, &[100; V13_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V13Error::BStale)
+    );
+}
+
+#[test]
 fn v13_favorable_action_requires_current_full_account_refresh() {
     let mut g = group();
     let mut a = account();
@@ -385,6 +415,53 @@ fn v13_b_residual_booking_is_bounded_and_remainder_conserving() {
         .unwrap();
     assert_eq!(chunk.remaining_after, 0);
     assert!(short.pnl <= -7);
+}
+
+#[test]
+fn v13_side_reset_snapshots_epoch_start_for_prior_epoch_accounts() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.assets[0].k_long = 5 * ADL_ONE as i128;
+    g.assets[0].oi_eff_long_q = 0;
+
+    g.begin_full_drain_reset(0, SideV13::Long).unwrap();
+    assert_eq!(
+        g.assets[0].mode_long,
+        percolator::v13::SideModeV13::ResetPending
+    );
+    g.full_account_refresh(&mut a, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(a.pnl, 5);
+
+    g.clear_leg(&mut a, 0).unwrap();
+    g.finalize_ready_reset_side(0, SideV13::Long).unwrap();
+    assert_eq!(g.assets[0].mode_long, percolator::v13::SideModeV13::Normal);
+    assert_eq!(g.assets[0].stored_pos_count_long, 0);
+}
+
+#[test]
+fn v13_quantity_adl_reduces_opposing_a_or_starts_reset_after_residual_durable() {
+    let mut g = group();
+    g.assets[0].oi_eff_long_q = 10;
+    g.assets[0].oi_eff_short_q = 10;
+    g.assets[0].a_short = ADL_ONE;
+
+    let partial = g
+        .apply_quantity_adl_after_residual_not_atomic(0, SideV13::Long, 4)
+        .unwrap();
+    assert_eq!(partial.closed_q, 4);
+    assert_eq!(g.assets[0].oi_eff_long_q, 6);
+    assert_eq!(g.assets[0].oi_eff_short_q, 6);
+    assert_eq!(g.assets[0].a_short, ADL_ONE * 6 / 10);
+
+    let full = g
+        .apply_quantity_adl_after_residual_not_atomic(0, SideV13::Long, 6)
+        .unwrap();
+    assert!(full.reset_started);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.assets[0].oi_eff_short_q, 0);
 }
 
 #[test]

@@ -253,6 +253,73 @@ fn proof_v13_favorable_action_requires_current_full_refresh() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_full_refresh_clears_stale_certificate() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+
+    group.mark_account_stale(&mut account).unwrap();
+    assert_eq!(group.stale_certificate_count, 1);
+    group
+        .full_account_refresh(&mut account, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    kani::cover!(
+        !account.stale_state,
+        "v13 stale account refresh clears stale state"
+    );
+    assert!(!account.stale_state);
+    assert_eq!(group.stale_certificate_count, 0);
+    assert_eq!(group.ensure_favorable_action_allowed(&account), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_side_reset_prior_epoch_account_can_clear_without_oi_underflow() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+    group.assets[0].oi_eff_long_q = 0;
+
+    group.begin_full_drain_reset(0, SideV13::Long).unwrap();
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    group.clear_leg(&mut account, 0).unwrap();
+    assert_eq!(group.assets[0].stored_pos_count_long, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    group.finalize_ready_reset_side(0, SideV13::Long).unwrap();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_quantity_adl_preserves_oi_symmetry_after_close() {
+    let close_q: u8 = kani::any();
+    kani::assume(close_q > 0);
+    kani::assume(close_q <= 4);
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    group.assets[0].oi_eff_long_q = 4;
+    group.assets[0].oi_eff_short_q = 4;
+
+    let out = group
+        .apply_quantity_adl_after_residual_not_atomic(0, SideV13::Long, close_q as u128)
+        .unwrap();
+    kani::cover!(out.closed_q > 0, "v13 quantity ADL close reachable");
+    assert_eq!(
+        group.assets[0].oi_eff_long_q,
+        group.assets[0].oi_eff_short_q
+    );
+    if close_q == 4 {
+        assert!(out.reset_started);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_fee_charge_settles_loss_before_fee() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();

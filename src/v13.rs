@@ -204,6 +204,10 @@ pub struct AssetStateV13 {
     pub k_short: i128,
     pub f_long_num: i128,
     pub f_short_num: i128,
+    pub k_epoch_start_long: i128,
+    pub k_epoch_start_short: i128,
+    pub f_epoch_start_long_num: i128,
+    pub f_epoch_start_short_num: i128,
     pub b_long_num: u128,
     pub b_short_num: u128,
     pub b_epoch_start_long_num: u128,
@@ -240,6 +244,10 @@ impl Default for AssetStateV13 {
             k_short: 0,
             f_long_num: 0,
             f_short_num: 0,
+            k_epoch_start_long: 0,
+            k_epoch_start_short: 0,
+            f_epoch_start_long_num: 0,
+            f_epoch_start_short_num: 0,
             b_long_num: 0,
             b_short_num: 0,
             b_epoch_start_long_num: 0,
@@ -447,6 +455,13 @@ pub struct BResidualBookingOutcomeV13 {
     pub explicit_loss: u128,
     pub delta_b: u128,
     pub remaining_after: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuantityAdlOutcomeV13 {
+    pub closed_q: u128,
+    pub opposite_a_after: u128,
+    pub reset_started: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -934,34 +949,48 @@ impl MarketGroupV13 {
             return Err(V13Error::InvalidLeg);
         }
         let asset = &mut self.assets[asset_index];
+        let prior_reset_epoch = match leg.side {
+            SideV13::Long => {
+                asset.mode_long == SideModeV13::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
+            }
+            SideV13::Short => {
+                asset.mode_short == SideModeV13::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
+            }
+        };
         match leg.side {
             SideV13::Long => {
                 asset.stored_pos_count_long = asset
                     .stored_pos_count_long
                     .checked_sub(1)
                     .ok_or(V13Error::CounterUnderflow)?;
-                asset.oi_eff_long_q = asset
-                    .oi_eff_long_q
-                    .checked_sub(leg.basis_pos_q.unsigned_abs())
-                    .ok_or(V13Error::CounterUnderflow)?;
-                asset.loss_weight_sum_long = asset
-                    .loss_weight_sum_long
-                    .checked_sub(leg.loss_weight)
-                    .ok_or(V13Error::CounterUnderflow)?;
+                if !prior_reset_epoch {
+                    asset.oi_eff_long_q = asset
+                        .oi_eff_long_q
+                        .checked_sub(leg.basis_pos_q.unsigned_abs())
+                        .ok_or(V13Error::CounterUnderflow)?;
+                    asset.loss_weight_sum_long = asset
+                        .loss_weight_sum_long
+                        .checked_sub(leg.loss_weight)
+                        .ok_or(V13Error::CounterUnderflow)?;
+                }
             }
             SideV13::Short => {
                 asset.stored_pos_count_short = asset
                     .stored_pos_count_short
                     .checked_sub(1)
                     .ok_or(V13Error::CounterUnderflow)?;
-                asset.oi_eff_short_q = asset
-                    .oi_eff_short_q
-                    .checked_sub(leg.basis_pos_q.unsigned_abs())
-                    .ok_or(V13Error::CounterUnderflow)?;
-                asset.loss_weight_sum_short = asset
-                    .loss_weight_sum_short
-                    .checked_sub(leg.loss_weight)
-                    .ok_or(V13Error::CounterUnderflow)?;
+                if !prior_reset_epoch {
+                    asset.oi_eff_short_q = asset
+                        .oi_eff_short_q
+                        .checked_sub(leg.basis_pos_q.unsigned_abs())
+                        .ok_or(V13Error::CounterUnderflow)?;
+                    asset.loss_weight_sum_short = asset
+                        .loss_weight_sum_short
+                        .checked_sub(leg.loss_weight)
+                        .ok_or(V13Error::CounterUnderflow)?;
+                }
             }
         }
         account.legs[asset_index] = PortfolioLegV13::EMPTY;
@@ -1036,12 +1065,11 @@ impl MarketGroupV13 {
                 self.mark_leg_b_stale(account, i)?;
             }
         }
-        if account.stale_state || account.b_stale_state {
-            return Err(if account.b_stale_state {
-                V13Error::BStale
-            } else {
-                V13Error::Stale
-            });
+        if account.b_stale_state {
+            return Err(V13Error::BStale);
+        }
+        if account.stale_state {
+            self.clear_account_stale(account)?;
         }
 
         let mut initial_req = 0u128;
@@ -1698,6 +1726,179 @@ impl MarketGroupV13 {
         })
     }
 
+    pub fn apply_quantity_adl_after_residual_not_atomic(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV13,
+        close_q: u128,
+    ) -> V13Result<QuantityAdlOutcomeV13> {
+        if asset_index >= self.config.max_portfolio_assets as usize || close_q == 0 {
+            return Err(V13Error::InvalidLeg);
+        }
+        let opp = opposite_side(bankrupt_side);
+        let asset = self.assets[asset_index];
+        let (liq_oi_before, opp_oi_before, opp_a_before) = match (bankrupt_side, opp) {
+            (SideV13::Long, SideV13::Short) => {
+                (asset.oi_eff_long_q, asset.oi_eff_short_q, asset.a_short)
+            }
+            (SideV13::Short, SideV13::Long) => {
+                (asset.oi_eff_short_q, asset.oi_eff_long_q, asset.a_long)
+            }
+            _ => unreachable!(),
+        };
+        if close_q > liq_oi_before || close_q > opp_oi_before {
+            return Err(V13Error::InvalidLeg);
+        }
+        let liq_oi_after = liq_oi_before - close_q;
+        let opp_oi_after = opp_oi_before - close_q;
+        let mut reset_started = false;
+        let mut opposite_a_after = if opp_oi_after == 0 {
+            ADL_ONE
+        } else {
+            wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before)
+        };
+
+        let force_full_reset = opp_oi_after != 0 && opposite_a_after == 0;
+        let final_liq_oi_after = if force_full_reset { 0 } else { liq_oi_after };
+        let final_opp_oi_after = if force_full_reset { 0 } else { opp_oi_after };
+        if force_full_reset {
+            opposite_a_after = ADL_ONE;
+        }
+
+        {
+            let asset = &mut self.assets[asset_index];
+            match bankrupt_side {
+                SideV13::Long => asset.oi_eff_long_q = final_liq_oi_after,
+                SideV13::Short => asset.oi_eff_short_q = final_liq_oi_after,
+            }
+            match opp {
+                SideV13::Long => {
+                    asset.oi_eff_long_q = final_opp_oi_after;
+                    asset.a_long =
+                        opposite_a_after.max(if final_opp_oi_after == 0 { ADL_ONE } else { 1 });
+                    if final_opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
+                        asset.mode_long = SideModeV13::DrainOnly;
+                    }
+                }
+                SideV13::Short => {
+                    asset.oi_eff_short_q = final_opp_oi_after;
+                    asset.a_short =
+                        opposite_a_after.max(if final_opp_oi_after == 0 { ADL_ONE } else { 1 });
+                    if final_opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
+                        asset.mode_short = SideModeV13::DrainOnly;
+                    }
+                }
+            }
+        }
+
+        if final_liq_oi_after == 0 {
+            self.begin_full_drain_reset(asset_index, bankrupt_side)?;
+            reset_started = true;
+        }
+        if final_opp_oi_after == 0 {
+            self.begin_full_drain_reset(asset_index, opp)?;
+            reset_started = true;
+        }
+        self.assert_public_invariants()?;
+        Ok(QuantityAdlOutcomeV13 {
+            closed_q: close_q,
+            opposite_a_after,
+            reset_started,
+        })
+    }
+
+    pub fn begin_full_drain_reset(&mut self, asset_index: usize, side: SideV13) -> V13Result<()> {
+        if self.active_bankrupt_close_present
+            || asset_index >= self.config.max_portfolio_assets as usize
+        {
+            return Err(V13Error::LockActive);
+        }
+        let asset = &mut self.assets[asset_index];
+        match side {
+            SideV13::Long => {
+                if asset.oi_eff_long_q != 0 {
+                    return Err(V13Error::InvalidLeg);
+                }
+                quarantine_remainder(
+                    &mut asset.social_loss_remainder_long_num,
+                    &mut asset.social_loss_dust_long_num,
+                )?;
+                asset.k_epoch_start_long = asset.k_long;
+                asset.f_epoch_start_long_num = asset.f_long_num;
+                asset.b_epoch_start_long_num = asset.b_long_num;
+                asset.k_long = 0;
+                asset.f_long_num = 0;
+                asset.b_long_num = 0;
+                asset.loss_weight_sum_long = 0;
+                asset.a_long = ADL_ONE;
+                asset.epoch_long = asset
+                    .epoch_long
+                    .checked_add(1)
+                    .ok_or(V13Error::CounterOverflow)?;
+                asset.mode_long = SideModeV13::ResetPending;
+            }
+            SideV13::Short => {
+                if asset.oi_eff_short_q != 0 {
+                    return Err(V13Error::InvalidLeg);
+                }
+                quarantine_remainder(
+                    &mut asset.social_loss_remainder_short_num,
+                    &mut asset.social_loss_dust_short_num,
+                )?;
+                asset.k_epoch_start_short = asset.k_short;
+                asset.f_epoch_start_short_num = asset.f_short_num;
+                asset.b_epoch_start_short_num = asset.b_short_num;
+                asset.k_short = 0;
+                asset.f_short_num = 0;
+                asset.b_short_num = 0;
+                asset.loss_weight_sum_short = 0;
+                asset.a_short = ADL_ONE;
+                asset.epoch_short = asset
+                    .epoch_short
+                    .checked_add(1)
+                    .ok_or(V13Error::CounterOverflow)?;
+                asset.mode_short = SideModeV13::ResetPending;
+            }
+        }
+        self.risk_epoch = self
+            .risk_epoch
+            .checked_add(1)
+            .ok_or(V13Error::CounterOverflow)?;
+        self.assert_public_invariants()
+    }
+
+    pub fn finalize_ready_reset_side(
+        &mut self,
+        asset_index: usize,
+        side: SideV13,
+    ) -> V13Result<()> {
+        if asset_index >= self.config.max_portfolio_assets as usize {
+            return Err(V13Error::InvalidLeg);
+        }
+        let asset = &mut self.assets[asset_index];
+        match side {
+            SideV13::Long => {
+                if asset.mode_long != SideModeV13::ResetPending {
+                    return Ok(());
+                }
+                if asset.stored_pos_count_long != 0 || asset.stale_account_count_long != 0 {
+                    return Err(V13Error::Stale);
+                }
+                asset.mode_long = SideModeV13::Normal;
+            }
+            SideV13::Short => {
+                if asset.mode_short != SideModeV13::ResetPending {
+                    return Ok(());
+                }
+                if asset.stored_pos_count_short != 0 || asset.stale_account_count_short != 0 {
+                    return Err(V13Error::Stale);
+                }
+                asset.mode_short = SideModeV13::Normal;
+            }
+        }
+        self.assert_public_invariants()
+    }
+
     pub fn risk_score(&self, account: &PortfolioAccountV13) -> V13Result<RiskScoreV13> {
         self.validate_account_shape(account)?;
         if !account.health_cert.valid {
@@ -1806,6 +2007,42 @@ impl MarketGroupV13 {
         }
     }
 
+    fn kf_target_for_leg(
+        &self,
+        asset_index: usize,
+        leg: PortfolioLegV13,
+    ) -> V13Result<(i128, i128)> {
+        let asset = self.assets[asset_index];
+        let (current_k, current_f, epoch_start_k, epoch_start_f, side_epoch, mode) = match leg.side
+        {
+            SideV13::Long => (
+                asset.k_long,
+                asset.f_long_num,
+                asset.k_epoch_start_long,
+                asset.f_epoch_start_long_num,
+                asset.epoch_long,
+                asset.mode_long,
+            ),
+            SideV13::Short => (
+                asset.k_short,
+                asset.f_short_num,
+                asset.k_epoch_start_short,
+                asset.f_epoch_start_short_num,
+                asset.epoch_short,
+                asset.mode_short,
+            ),
+        };
+        if leg.epoch_snap == side_epoch {
+            Ok((current_k, current_f))
+        } else if mode == SideModeV13::ResetPending
+            && leg.epoch_snap.checked_add(1) == Some(side_epoch)
+        {
+            Ok((epoch_start_k, epoch_start_f))
+        } else {
+            Err(V13Error::InvalidLeg)
+        }
+    }
+
     fn residual(&self) -> u128 {
         self.vault
             .saturating_sub(self.c_tot.saturating_add(self.insurance))
@@ -1841,11 +2078,7 @@ impl MarketGroupV13 {
         if !leg.active {
             return Ok(());
         }
-        let asset = self.assets[asset_index];
-        let (k_now, f_now) = match leg.side {
-            SideV13::Long => (asset.k_long, asset.f_long_num),
-            SideV13::Short => (asset.k_short, asset.f_short_num),
-        };
+        let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
         let den = leg
             .a_basis
             .checked_mul(POS_SCALE)
@@ -2158,6 +2391,21 @@ fn opposite_side(side: SideV13) -> SideV13 {
         SideV13::Long => SideV13::Short,
         SideV13::Short => SideV13::Long,
     }
+}
+
+fn quarantine_remainder(remainder: &mut u128, dust: &mut u128) -> V13Result<()> {
+    if *remainder == 0 {
+        return Ok(());
+    }
+    let new_dust = dust
+        .checked_add(*remainder)
+        .ok_or(V13Error::ArithmeticOverflow)?;
+    if new_dust >= SOCIAL_LOSS_DEN {
+        return Err(V13Error::RecoveryRequired);
+    }
+    *dust = new_dust;
+    *remainder = 0;
+    Ok(())
 }
 
 fn validate_non_min_i128(v: i128) -> V13Result<()> {
