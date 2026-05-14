@@ -672,6 +672,27 @@ fn v13_resolved_close_is_bounded_and_fee_current() {
 }
 
 #[test]
+fn v13_resolved_positive_payout_uses_stable_snapshot_denominator() {
+    let mut g = group();
+    let mut a = account();
+    let mut b = account();
+    b.provenance_header.portfolio_account_id = [4; 32];
+    g.vault = 100;
+    a.pnl = 100;
+    b.pnl = 100;
+    g.pnl_pos_tot = 200;
+    g.resolve_market_not_atomic(1).unwrap();
+
+    let first = g.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+    let second = g.close_resolved_account_not_atomic(&mut b, 0).unwrap();
+
+    assert_eq!(first, ResolvedCloseOutcomeV13::Closed { payout: 50 });
+    assert_eq!(second, ResolvedCloseOutcomeV13::Closed { payout: 50 });
+    assert_eq!(g.payout_snapshot, 100);
+    assert_eq!(g.payout_snapshot_pnl_pos_tot, 200);
+}
+
+#[test]
 fn v13_liquidation_requires_strict_account_risk_progress() {
     let mut g = group();
     let mut a = account();

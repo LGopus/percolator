@@ -2,7 +2,8 @@
 
 use percolator::v13::{
     account_equity, HLockLaneV13, MarketGroupV13, PortfolioAccountV13, ProvenanceHeaderV13,
-    SideV13, TradeRequestV13, V13Config, V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
+    ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
+    V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{POS_SCALE, SOCIAL_LOSS_DEN};
 
@@ -518,6 +519,35 @@ fn proof_v13_loss_stale_blocks_nonflat_withdrawal() {
     let result = group.withdraw_not_atomic(&mut account, 10, &[1; V13_MAX_PORTFOLIO_ASSETS_N]);
 
     assert_eq!(result, Err(V13Error::LockActive));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_resolved_positive_payout_snapshot_is_order_stable() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut first = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut second = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    group.vault = 100;
+    first.pnl = 100;
+    second.pnl = 100;
+    group.pnl_pos_tot = 200;
+    group.resolve_market_not_atomic(1).unwrap();
+
+    let first_close = group.close_resolved_account_not_atomic(&mut first, 0);
+    let second_close = group.close_resolved_account_not_atomic(&mut second, 0);
+
+    assert_eq!(
+        first_close,
+        Ok(ResolvedCloseOutcomeV13::Closed { payout: 50 })
+    );
+    assert_eq!(
+        second_close,
+        Ok(ResolvedCloseOutcomeV13::Closed { payout: 50 })
+    );
+    assert_eq!(group.payout_snapshot, 100);
+    assert_eq!(group.payout_snapshot_pnl_pos_tot, 200);
 }
 
 #[kani::proof]

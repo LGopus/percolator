@@ -406,6 +406,7 @@ pub struct MarketGroupV13 {
     pub mode: MarketModeV13,
     pub resolved_slot: u64,
     pub payout_snapshot: u128,
+    pub payout_snapshot_pnl_pos_tot: u128,
     pub payout_snapshot_captured: bool,
 }
 
@@ -515,6 +516,7 @@ impl MarketGroupV13 {
             mode: MarketModeV13::Live,
             resolved_slot: 0,
             payout_snapshot: 0,
+            payout_snapshot_pnl_pos_tot: 0,
             payout_snapshot_captured: false,
         })
     }
@@ -1592,11 +1594,21 @@ impl MarketGroupV13 {
         }
         if !self.payout_snapshot_captured {
             self.payout_snapshot = self.residual();
+            self.payout_snapshot_pnl_pos_tot = self.pnl_pos_tot;
             self.payout_snapshot_captured = true;
         }
+        let pnl_payout = if account.pnl > 0 && self.payout_snapshot_pnl_pos_tot != 0 {
+            wide_mul_div_floor_u128(
+                account.pnl as u128,
+                self.payout_snapshot,
+                self.payout_snapshot_pnl_pos_tot,
+            )
+        } else {
+            0
+        };
         let payout = account
             .capital
-            .checked_add(account.pnl.max(0) as u128)
+            .checked_add(pnl_payout)
             .ok_or(V13Error::ArithmeticOverflow)?
             .min(self.vault);
         self.vault = self
