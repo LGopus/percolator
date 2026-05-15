@@ -337,6 +337,18 @@ fn v13_risk_notional_and_equity_use_exact_conservative_shapes() {
 }
 
 #[test]
+fn v13_flat_account_equity_is_capital_plus_pnl_minus_fee_debt() {
+    let mut a = account();
+    a.capital = 123;
+    a.pnl = -45;
+    a.fee_credits = -6;
+    assert_eq!(account_equity(&a), Ok(72));
+
+    a.pnl = 45;
+    assert_eq!(account_equity(&a), Ok(162));
+}
+
+#[test]
 fn v13_deposit_withdraw_roundtrip_preserves_accounting() {
     let mut g = group();
     let mut a = account();

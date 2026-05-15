@@ -162,6 +162,31 @@ fn proof_v13_account_equity_rejects_malformed_fee_credits() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_flat_account_equity_is_exact_capital_plus_pnl_minus_fee_debt() {
+    let capital: u16 = kani::any();
+    let pnl: i16 = kani::any();
+    let debt: u16 = kani::any();
+    kani::assume(capital <= 10_000);
+    kani::assume(debt <= 10_000);
+    let (market, account_id, owner) = symbolic_ids();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    account.capital = capital as u128;
+    account.pnl = pnl as i128;
+    account.fee_credits = -(debt as i128);
+
+    let expected = (capital as i128) + (pnl as i128) - (debt as i128);
+    let actual = account_equity(&account).unwrap();
+
+    kani::cover!(pnl < 0, "v13 flat negative pnl equity branch reachable");
+    kani::cover!(pnl >= 0, "v13 flat nonnegative pnl equity branch reachable");
+    kani::cover!(debt > 0, "v13 flat account fee debt branch reachable");
+    assert_eq!(actual, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_public_config_rejects_invalid_user_fund_shapes() {
     let case: u8 = kani::any();
     kani::assume(case < 6);
