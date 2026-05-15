@@ -825,6 +825,44 @@ fn v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
 }
 
 #[test]
+fn v13_bankrupt_liquidation_requires_residual_durable_before_freeing_exposure() {
+    let (market, _, owner) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut bankrupt = account();
+    let mut opposing = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+
+    g.attach_leg(&mut bankrupt, 0, SideV13::Long, 4).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV13::Short, -10).unwrap();
+    bankrupt.pnl = -5;
+    g.negative_pnl_account_count = 1;
+
+    let before_bitmap = bankrupt.active_bitmap;
+    let before_basis = bankrupt.legs[0].basis_pos_q;
+    let before_pnl = bankrupt.pnl;
+    let res = g.liquidate_account_not_atomic(
+        &mut bankrupt,
+        LiquidationRequestV13 {
+            asset_index: 0,
+            close_q: 4,
+            fee_bps: 0,
+        },
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V13Error::RecoveryRequired));
+    assert_eq!(
+        g.recovery_reason,
+        Some(PermissionlessRecoveryReasonV13::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(bankrupt.active_bitmap, before_bitmap);
+    assert_eq!(bankrupt.legs[0].basis_pos_q, before_basis);
+    assert_eq!(bankrupt.pnl, before_pnl);
+    assert_eq!(g.assets[0].b_short_num, 0);
+}
+
+#[test]
 fn v13_rebalance_reduce_position_requires_strict_risk_progress_and_preserves_senior_claims() {
     let mut g = group();
     let mut a = account();

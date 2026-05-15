@@ -1,9 +1,10 @@
 #![cfg(kani)]
 
 use percolator::v13::{
-    account_equity, HLockLaneV13, LiquidationRequestV13, MarketGroupV13, PortfolioAccountV13,
-    ProvenanceHeaderV13, RebalanceRequestV13, ResolvedCloseOutcomeV13, SideV13, TradeRequestV13,
-    V13Config, V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
+    account_equity, HLockLaneV13, LiquidationRequestV13, MarketGroupV13,
+    PermissionlessRecoveryReasonV13, PortfolioAccountV13, ProvenanceHeaderV13, RebalanceRequestV13,
+    ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
+    V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{POS_SCALE, SOCIAL_LOSS_DEN};
 
@@ -613,6 +614,68 @@ fn proof_v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     assert_eq!(group.insurance, 0);
     assert_eq!(account.pnl, 0);
     assert_eq!(account.active_bitmap, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
+fn proof_v13_bankrupt_liquidation_cannot_free_exposure_before_residual_durable() {
+    let larger_residual: bool = kani::any();
+    let residual = if larger_residual { -3 } else { -2 };
+    let (market, account_id, owner) = concrete_ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 1);
+    cfg.public_b_chunk_atoms = 1;
+    let mut group = MarketGroupV13::new(market, cfg).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+
+    group
+        .attach_leg(&mut bankrupt, 0, SideV13::Long, 4)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV13::Short, -10)
+        .unwrap();
+    group.assets[0].b_short_num = u128::MAX;
+    group.assets[0].social_loss_remainder_short_num = 10;
+    bankrupt.pnl = residual;
+    group.negative_pnl_account_count = 1;
+    let before_b_short = group.assets[0].b_short_num;
+    let before_bitmap = bankrupt.active_bitmap;
+    let before_basis = bankrupt.legs[0].basis_pos_q;
+    let before_pnl = bankrupt.pnl;
+
+    let result = group.liquidate_account_not_atomic(
+        &mut bankrupt,
+        LiquidationRequestV13 {
+            asset_index: 0,
+            close_q: 4,
+            fee_bps: 0,
+        },
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        result == Err(V13Error::RecoveryRequired),
+        "v13 partial residual recovery path reachable"
+    );
+    kani::cover!(
+        !larger_residual,
+        "v13 residual durability proof covers two atoms"
+    );
+    kani::cover!(
+        larger_residual,
+        "v13 residual durability proof covers three atoms"
+    );
+    assert_eq!(result, Err(V13Error::RecoveryRequired));
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV13::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(bankrupt.active_bitmap, before_bitmap);
+    assert_eq!(bankrupt.legs[0].basis_pos_q, before_basis);
+    assert_eq!(bankrupt.pnl, before_pnl);
+    assert_eq!(group.assets[0].b_short_num, before_b_short);
 }
 
 #[kani::proof]

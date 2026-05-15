@@ -1510,6 +1510,7 @@ impl MarketGroupV13 {
             return Err(V13Error::InvalidLeg);
         }
         let close_q = request.close_q.min(leg.basis_pos_q.unsigned_abs());
+        self.preflight_liquidation_residual_durability(request.asset_index, leg.side, account)?;
         let fee_notional = risk_notional_ceil(close_q, effective_prices[request.asset_index])?;
         let fee = checked_fee_bps(fee_notional, request.fee_bps)?
             .max(self.config.min_liquidation_abs)
@@ -1751,37 +1752,11 @@ impl MarketGroupV13 {
                 remaining_after: 0,
             });
         }
-        let headroom_plus_one = U256::from_u128(u128::MAX - b_now)
-            .checked_add(U256::ONE)
-            .ok_or(V13Error::ArithmeticOverflow)?;
-        let max_scaled = headroom_plus_one
-            .checked_mul(U256::from_u128(weight_sum))
-            .and_then(|v| v.checked_sub(U256::ONE))
-            .ok_or(V13Error::ArithmeticOverflow)?;
-        if U256::from_u128(rem) > max_scaled {
-            return self
-                .declare_permissionless_recovery(
-                    PermissionlessRecoveryReasonV13::BIndexHeadroomExhausted,
-                )
-                .map(|_| BResidualBookingOutcomeV13 {
-                    booked_loss: 0,
-                    explicit_loss: 0,
-                    delta_b: 0,
-                    remaining_after: residual_remaining,
-                });
-        }
-        let scaled_after_remainder = max_scaled
-            .checked_sub(U256::from_u128(rem))
-            .ok_or(V13Error::ArithmeticOverflow)?;
-        let max_chunk_by_b_wide = scaled_after_remainder
-            .checked_div(U256::from_u128(SOCIAL_LOSS_DEN))
-            .ok_or(V13Error::ArithmeticOverflow)?;
-        let max_chunk_by_b = max_chunk_by_b_wide
-            .try_into_u128()
-            .unwrap_or(residual_remaining);
-        let engine_chunk = residual_remaining
-            .min(max_chunk_by_b)
-            .min(self.config.public_b_chunk_atoms);
+        let engine_chunk = self.bankruptcy_residual_single_step_capacity(
+            asset_index,
+            bankrupt_side,
+            residual_remaining,
+        )?;
         if engine_chunk == 0 {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV13::BIndexHeadroomExhausted,
@@ -2173,6 +2148,93 @@ impl MarketGroupV13 {
         self.set_account_pnl(account, new_pnl)?;
         account.health_cert.valid = false;
         Ok(used)
+    }
+
+    fn preflight_liquidation_residual_durability(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV13,
+        account: &PortfolioAccountV13,
+    ) -> V13Result<()> {
+        let residual_after_principal_and_insurance = if account.pnl < 0 {
+            account
+                .pnl
+                .unsigned_abs()
+                .saturating_sub(account.capital)
+                .saturating_sub(self.insurance)
+        } else {
+            0
+        };
+        if residual_after_principal_and_insurance == 0 {
+            return Ok(());
+        }
+        let capacity = self.bankruptcy_residual_single_step_capacity(
+            asset_index,
+            bankrupt_side,
+            residual_after_principal_and_insurance,
+        )?;
+        if capacity < residual_after_principal_and_insurance {
+            self.declare_permissionless_recovery(
+                PermissionlessRecoveryReasonV13::ActiveBankruptCloseCannotProgress,
+            )?;
+            return Err(V13Error::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    fn bankruptcy_residual_single_step_capacity(
+        &self,
+        asset_index: usize,
+        bankrupt_side: SideV13,
+        residual_remaining: u128,
+    ) -> V13Result<u128> {
+        if asset_index >= self.config.max_portfolio_assets as usize {
+            return Err(V13Error::InvalidLeg);
+        }
+        if residual_remaining == 0 {
+            return Ok(0);
+        }
+
+        let opp = opposite_side(bankrupt_side);
+        let asset = self.assets[asset_index];
+        let (b_now, weight_sum, rem, explicit_used) = match opp {
+            SideV13::Long => (
+                asset.b_long_num,
+                asset.loss_weight_sum_long,
+                asset.social_loss_remainder_long_num,
+                asset.explicit_unallocated_loss_long,
+            ),
+            SideV13::Short => (
+                asset.b_short_num,
+                asset.loss_weight_sum_short,
+                asset.social_loss_remainder_short_num,
+                asset.explicit_unallocated_loss_short,
+            ),
+        };
+        if weight_sum == 0 {
+            return Ok(residual_remaining.min(u128::MAX - explicit_used));
+        }
+
+        let headroom_plus_one = U256::from_u128(u128::MAX - b_now)
+            .checked_add(U256::ONE)
+            .ok_or(V13Error::ArithmeticOverflow)?;
+        let max_scaled = headroom_plus_one
+            .checked_mul(U256::from_u128(weight_sum))
+            .and_then(|v| v.checked_sub(U256::ONE))
+            .ok_or(V13Error::ArithmeticOverflow)?;
+        if U256::from_u128(rem) > max_scaled {
+            return Ok(0);
+        }
+        let max_chunk_by_b_wide = max_scaled
+            .checked_sub(U256::from_u128(rem))
+            .and_then(|v| v.checked_div(U256::from_u128(SOCIAL_LOSS_DEN)))
+            .ok_or(V13Error::ArithmeticOverflow)?;
+        let max_chunk_by_b = max_chunk_by_b_wide
+            .try_into_u128()
+            .unwrap_or(residual_remaining);
+        Ok(residual_remaining
+            .min(max_chunk_by_b)
+            .min(self.config.public_b_chunk_atoms))
     }
 
     fn resolved_positive_payout_ready(&self) -> bool {
