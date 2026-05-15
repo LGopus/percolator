@@ -401,6 +401,26 @@ fn v13_flat_account_equity_is_capital_plus_pnl_minus_fee_debt() {
 }
 
 #[test]
+fn v13_authoritatively_flat_account_never_receives_b_loss() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.assets[0].b_long_num = 10;
+    g.assets[0].b_short_num = 7;
+
+    let outcome = g
+        .settle_account_side_effects_not_atomic(&mut a, g.config.public_b_chunk_atoms)
+        .unwrap();
+
+    assert_eq!(outcome, PermissionlessProgressOutcomeV13::AccountCurrent);
+    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.pnl, 0);
+    assert_eq!(a.capital, 100);
+    assert!(!a.b_stale_state);
+    assert_eq!(g.b_stale_account_count, 0);
+}
+
+#[test]
 fn v13_deposit_withdraw_roundtrip_preserves_accounting() {
     let mut g = group();
     let mut a = account();

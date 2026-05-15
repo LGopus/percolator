@@ -264,6 +264,39 @@ fn proof_v13_flat_account_equity_is_exact_capital_plus_pnl_minus_fee_debt() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_authoritatively_flat_account_never_receives_b_loss() {
+    let b_long: u8 = kani::any();
+    let b_short: u8 = kani::any();
+    let budget: u8 = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 100).unwrap();
+    group.assets[0].b_long_num = b_long as u128;
+    group.assets[0].b_short_num = b_short as u128;
+
+    let before_account = account;
+    let before_count = group.b_stale_account_count;
+    let outcome = group
+        .settle_account_side_effects_not_atomic(&mut account, budget as u128)
+        .unwrap();
+
+    kani::cover!(
+        b_long > 0 || b_short > 0,
+        "v13 flat account with nonzero side B accumulator reachable"
+    );
+    assert_eq!(outcome, PermissionlessProgressOutcomeV13::AccountCurrent);
+    assert_eq!(account.active_bitmap, 0);
+    assert_eq!(account.pnl, before_account.pnl);
+    assert_eq!(account.capital, before_account.capital);
+    assert_eq!(account.b_stale_state, before_account.b_stale_state);
+    assert_eq!(group.b_stale_account_count, before_count);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_public_config_rejects_invalid_user_fund_shapes() {
     let case: u8 = kani::any();
     kani::assume(case < 6);
