@@ -3,11 +3,11 @@
 use percolator::v13::{
     account_equity, HLockLaneV13, LiquidationRequestV13, MarketGroupV13,
     PermissionlessCrankActionV13, PermissionlessCrankRequestV13, PermissionlessProgressOutcomeV13,
-    PermissionlessRecoveryReasonV13, PortfolioAccountV13, ProvenanceHeaderV13, RebalanceRequestV13,
-    ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
+    PermissionlessRecoveryReasonV13, PortfolioAccountV13, PortfolioLegV13, ProvenanceHeaderV13,
+    RebalanceRequestV13, ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
     V13_MAX_PORTFOLIO_ASSETS_N,
 };
-use percolator::{MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{ADL_ONE, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, POS_SCALE, SOCIAL_LOSS_DEN};
 
 fn symbolic_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     let market: [u8; 32] = kani::any();
@@ -510,6 +510,42 @@ fn proof_v13_hidden_leg_rejected_by_bitmap_authority() {
         account.active_bitmap == 0 && account.legs[0].active,
         "v13 hidden active leg reachable"
     );
+    assert_eq!(
+        group.validate_account_shape(&account),
+        Err(V13Error::HiddenLeg)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_configured_portfolio_width_rejects_out_of_range_leg() {
+    let active_bit: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    account.legs[1] = PortfolioLegV13 {
+        active: true,
+        side: SideV13::Long,
+        basis_pos_q: 1,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: 1,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    if active_bit {
+        account.active_bitmap |= 1 << 1;
+    }
+
+    kani::cover!(active_bit, "v13 out-of-range leg with bitmap reachable");
+    kani::cover!(!active_bit, "v13 out-of-range hidden leg reachable");
     assert_eq!(
         group.validate_account_shape(&account),
         Err(V13Error::HiddenLeg)
