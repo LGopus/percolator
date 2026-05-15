@@ -395,6 +395,70 @@ fn proof_v13_permissionless_recovery_declares_reason_or_fails_closed() {
 }
 
 #[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v13_permissionless_crank_recovery_declaration_is_accounting_neutral() {
+    let reason_case: u8 = kani::any();
+    kani::assume(reason_case < 8);
+    let reason = match reason_case {
+        0 => PermissionlessRecoveryReasonV13::BelowProgressFloor,
+        1 => PermissionlessRecoveryReasonV13::BlockedSegmentHeadroomOrRepresentability,
+        2 => PermissionlessRecoveryReasonV13::AccountBSettlementCannotProgress,
+        3 => PermissionlessRecoveryReasonV13::BIndexHeadroomExhausted,
+        4 => PermissionlessRecoveryReasonV13::ActiveBankruptCloseCannotProgress,
+        5 => PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow,
+        6 => PermissionlessRecoveryReasonV13::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        _ => PermissionlessRecoveryReasonV13::CounterOrEpochOverflowDeclaredRecovery,
+    };
+    let (market, account_id, owner) = symbolic_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 100).unwrap();
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+
+    let account_before = account;
+    let vault_before = group.vault;
+    let c_tot_before = group.c_tot;
+    let insurance_before = group.insurance;
+    let pnl_pos_before = group.pnl_pos_tot;
+    let asset_before = group.assets[0];
+    let slot_last_before = group.slot_last;
+    let current_slot_before = group.current_slot;
+    let outcome = group.permissionless_crank_not_atomic(
+        &mut account,
+        PermissionlessCrankRequestV13 {
+            now_slot: current_slot_before + 1,
+            asset_index: 0,
+            effective_price: 2,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV13::Recover(reason),
+        },
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        reason_case == 0,
+        "v13 recovery-crank first reason reachable"
+    );
+    kani::cover!(reason_case == 7, "v13 recovery-crank last reason reachable");
+    assert_eq!(
+        outcome,
+        Ok(PermissionlessProgressOutcomeV13::RecoveryDeclared(reason))
+    );
+    assert_eq!(group.recovery_reason, Some(reason));
+    assert_eq!(account, account_before);
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(group.c_tot, c_tot_before);
+    assert_eq!(group.insurance, insurance_before);
+    assert_eq!(group.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(group.assets[0], asset_before);
+    assert_eq!(group.slot_last, slot_last_before);
+    assert_eq!(group.current_slot, current_slot_before);
+    assert_eq!(group.mode, MarketModeV13::Live);
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_public_config_accepts_full_margin_loss_only_envelope() {

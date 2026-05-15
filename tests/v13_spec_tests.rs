@@ -805,6 +805,52 @@ fn v13_permissionless_recovery_fails_closed_when_disabled() {
 }
 
 #[test]
+fn v13_permissionless_crank_recovery_declaration_is_accounting_neutral() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, 1).unwrap();
+    let account_before = a;
+    let vault_before = g.vault;
+    let c_tot_before = g.c_tot;
+    let insurance_before = g.insurance;
+    let pnl_pos_before = g.pnl_pos_tot;
+    let asset_before = g.assets[0];
+    let slot_last_before = g.slot_last;
+    let current_slot_before = g.current_slot;
+    let reason = PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow;
+
+    let out = g
+        .permissionless_crank_not_atomic(
+            &mut a,
+            PermissionlessCrankRequestV13 {
+                now_slot: current_slot_before + 1,
+                asset_index: 0,
+                effective_price: 2,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV13::Recover(reason),
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(
+        out,
+        PermissionlessProgressOutcomeV13::RecoveryDeclared(reason)
+    );
+    assert_eq!(g.recovery_reason, Some(reason));
+    assert_eq!(a, account_before);
+    assert_eq!(g.vault, vault_before);
+    assert_eq!(g.c_tot, c_tot_before);
+    assert_eq!(g.insurance, insurance_before);
+    assert_eq!(g.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(g.assets[0], asset_before);
+    assert_eq!(g.slot_last, slot_last_before);
+    assert_eq!(g.current_slot, current_slot_before);
+    assert_eq!(g.mode, MarketModeV13::Live);
+}
+
+#[test]
 fn v13_fees_are_charged_only_after_realized_losses() {
     let mut g = group();
     let mut a = account();
