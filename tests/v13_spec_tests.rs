@@ -1321,6 +1321,81 @@ fn v13_sign_flip_trade_preserves_oi_symmetry_and_senior_accounting() {
 }
 
 #[test]
+fn v13_e2e_trade_mark_close_convert_withdraw_conserves() {
+    let (market, _, owner) = ids();
+    let mut g = group();
+    let mut alice = account();
+    let mut bob = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    let px1 = [1; V13_MAX_PORTFOLIO_ASSETS_N];
+    let px2 = [2; V13_MAX_PORTFOLIO_ASSETS_N];
+
+    g.deposit_not_atomic(&mut alice, 10_000).unwrap();
+    g.deposit_not_atomic(&mut bob, 10_000).unwrap();
+    let vault_after_deposit = g.vault;
+
+    g.execute_trade_with_fee_not_atomic(
+        &mut alice,
+        &mut bob,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &px1,
+    )
+    .unwrap();
+    assert_eq!(g.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(g.assets[0].oi_eff_short_q, POS_SCALE);
+
+    g.permissionless_crank_not_atomic(
+        &mut alice,
+        PermissionlessCrankRequestV13 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 2,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV13::Refresh,
+        },
+        &px2,
+    )
+    .unwrap();
+    g.full_account_refresh(&mut alice, &px2).unwrap();
+    g.full_account_refresh(&mut bob, &px2).unwrap();
+    assert!(alice.pnl > 0, "long should have mark profit after price increase");
+    assert!(bob.pnl < 0, "short should have mark loss after price increase");
+
+    g.execute_trade_with_fee_not_atomic(
+        &mut bob,
+        &mut alice,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 2,
+            fee_bps: 0,
+        },
+        &px2,
+    )
+    .unwrap();
+    assert_eq!(alice.active_bitmap, 0);
+    assert_eq!(bob.active_bitmap, 0);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.assets[0].oi_eff_short_q, 0);
+
+    let converted = g
+        .convert_released_pnl_to_capital_not_atomic(&mut alice)
+        .unwrap();
+    assert_eq!(converted, 1);
+    assert_eq!(alice.pnl, 0);
+    assert_eq!(g.pnl_pos_tot, 0);
+
+    g.withdraw_not_atomic(&mut alice, 100, &px2).unwrap();
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+    assert_eq!(g.c_tot, alice.capital + bob.capital);
+    assert_eq!(g.vault, vault_after_deposit - 100);
+}
+
+#[test]
 fn v13_price_accrual_then_refresh_matches_eager_mark_pnl() {
     let mut g = group();
     g.assets[0].effective_price = 100;
