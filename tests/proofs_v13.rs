@@ -679,6 +679,57 @@ fn proof_v13_bankrupt_liquidation_cannot_free_exposure_before_residual_durable()
 }
 
 #[kani::proof]
+#[kani::unwind(55)]
+#[kani::solver(cadical)]
+fn proof_v13_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once() {
+    let insurance_units: u8 = kani::any();
+    kani::assume(insurance_units <= 2);
+    let insurance = insurance_units as u128;
+    let (market, account_id, owner) = concrete_ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 1);
+    cfg.liquidation_fee_bps = 10_000;
+    cfg.liquidation_fee_cap = 10;
+    cfg.min_liquidation_abs = 1;
+    let mut group = MarketGroupV13::new(market, cfg).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+
+    group.vault = insurance;
+    group.insurance = insurance;
+    account.pnl = -5;
+    group.negative_pnl_account_count = 1;
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+
+    let out = group
+        .liquidate_account_not_atomic(
+            &mut account,
+            LiquidationRequestV13 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 10_000,
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    kani::cover!(
+        insurance == 0,
+        "v13 bankrupt liquidation zero-insurance path reachable"
+    );
+    kani::cover!(
+        insurance == 2,
+        "v13 bankrupt liquidation partial-insurance path reachable"
+    );
+    assert_eq!(out.fee_charged, 0);
+    assert_eq!(out.insurance_used, insurance);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(out.explicit_loss, 5 - insurance);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(account.active_bitmap, 0);
+}
+
+#[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
 fn proof_v13_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk() {

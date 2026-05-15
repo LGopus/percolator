@@ -825,6 +825,42 @@ fn v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
 }
 
 #[test]
+fn v13_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.liquidation_fee_bps = 10_000;
+    cfg.liquidation_fee_cap = 10;
+    cfg.min_liquidation_abs = 1;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut a = account();
+    g.vault = 2;
+    g.insurance = 2;
+    a.pnl = -5;
+    g.negative_pnl_account_count = 1;
+    g.attach_leg(&mut a, 0, SideV13::Long, 1).unwrap();
+
+    let out = g
+        .liquidate_account_not_atomic(
+            &mut a,
+            LiquidationRequestV13 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 10_000,
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.fee_charged, 0);
+    assert_eq!(out.insurance_used, 2);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(out.explicit_loss, 3);
+    assert_eq!(g.insurance, 0);
+    assert_eq!(a.pnl, 0);
+    assert_eq!(a.active_bitmap, 0);
+}
+
+#[test]
 fn v13_bankrupt_liquidation_requires_residual_durable_before_freeing_exposure() {
     let (market, _, owner) = ids();
     let mut cfg = V13Config::public_user_fund(1, 0, 10);
