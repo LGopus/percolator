@@ -5,7 +5,10 @@ use percolator::v13::{
     PortfolioLegV13, ProvenanceHeaderV13, RebalanceRequestV13, ResolvedCloseOutcomeV13, SideV13,
     TradeRequestV13, V13Config, V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
 };
-use percolator::{ADL_ONE, MAX_ACCOUNT_NOTIONAL, MAX_PROTOCOL_FEE_ABS, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{
+    ADL_ONE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE, MAX_PROTOCOL_FEE_ABS, POS_SCALE,
+    SOCIAL_LOSS_DEN,
+};
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
@@ -367,6 +370,36 @@ fn v13_public_init_rejects_price_funding_or_liquidation_envelope_breach() {
         MarketGroupV13::new(market, liquidation_breach),
         Err(V13Error::InvalidConfig)
     );
+}
+
+#[test]
+fn v13_public_init_rejects_zero_price_move_cap() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.max_price_move_bps_per_slot = 0;
+
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+}
+
+#[test]
+fn v13_oracle_price_zero_rejected_and_max_price_accepted_when_unexposed() {
+    let mut g = group();
+    let before = g;
+
+    assert_eq!(
+        g.accrue_asset_to_not_atomic(0, 1, 0, 0, false),
+        Err(V13Error::InvalidConfig)
+    );
+    assert_eq!(g, before);
+
+    let out = g
+        .accrue_asset_to_not_atomic(0, 1, MAX_ORACLE_PRICE, 0, false)
+        .unwrap();
+    assert!(!out.equity_active);
+    assert_eq!(g.assets[0].effective_price, MAX_ORACLE_PRICE);
 }
 
 #[test]
