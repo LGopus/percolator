@@ -1198,6 +1198,28 @@ fn v13_price_accrual_then_refresh_matches_eager_mark_pnl() {
 }
 
 #[test]
+fn v13_same_epoch_full_refresh_is_idempotent_after_kf_settlement() {
+    let mut g = group();
+    g.assets[0].effective_price = 100;
+    g.assets[0].fund_px_last = 100;
+    g.assets[0].raw_oracle_target_price = 100;
+    let mut a = account();
+
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.accrue_asset_to_not_atomic(0, 1, 101, 0, true).unwrap();
+    g.full_account_refresh(&mut a, &[101; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    let account_after_first = a;
+    let group_after_first = g;
+
+    g.full_account_refresh(&mut a, &[101; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(a, account_after_first);
+    assert_eq!(g, group_after_first);
+}
+
+#[test]
 fn v13_funding_accrual_then_refresh_matches_sign_and_floor() {
     let (market, _, _) = ids();
     let mut cfg = V13Config::public_user_fund(4, 0, 10);
@@ -1452,6 +1474,29 @@ fn v13_side_reset_snapshots_epoch_start_for_prior_epoch_accounts() {
     g.finalize_ready_reset_side(0, SideV13::Long).unwrap();
     assert_eq!(g.assets[0].mode_long, percolator::v13::SideModeV13::Normal);
     assert_eq!(g.assets[0].stored_pos_count_long, 0);
+}
+
+#[test]
+fn v13_side_reset_cannot_finalize_until_prior_epoch_positions_clear() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.assets[0].oi_eff_long_q = 0;
+
+    g.begin_full_drain_reset(0, SideV13::Long).unwrap();
+    assert_eq!(
+        g.assets[0].mode_long,
+        percolator::v13::SideModeV13::ResetPending
+    );
+    assert_eq!(
+        g.finalize_ready_reset_side(0, SideV13::Long),
+        Err(V13Error::Stale)
+    );
+
+    g.clear_leg(&mut a, 0).unwrap();
+    assert_eq!(g.finalize_ready_reset_side(0, SideV13::Long), Ok(()));
+    assert_eq!(g.assets[0].mode_long, percolator::v13::SideModeV13::Normal);
 }
 
 #[test]

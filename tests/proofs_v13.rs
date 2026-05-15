@@ -1094,6 +1094,31 @@ fn proof_v13_side_reset_prior_epoch_account_can_clear_without_oi_underflow() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_side_reset_finalize_requires_prior_epoch_positions_clear() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+    group.assets[0].oi_eff_long_q = 0;
+
+    group.begin_full_drain_reset(0, SideV13::Long).unwrap();
+    kani::cover!(
+        group.assets[0].stored_pos_count_long != 0,
+        "v13 reset pending with prior-epoch stored position reachable"
+    );
+    assert_eq!(
+        group.finalize_ready_reset_side(0, SideV13::Long),
+        Err(V13Error::Stale)
+    );
+
+    group.clear_leg(&mut account, 0).unwrap();
+    assert_eq!(group.finalize_ready_reset_side(0, SideV13::Long), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_quantity_adl_preserves_oi_symmetry_after_close() {
     let close_q: u8 = kani::any();
     kani::assume(close_q > 0);
@@ -2344,6 +2369,79 @@ fn assert_invalid_trade_reverts(request: TradeRequestV13) {
 fn proof_v13_price_accrual_refresh_matches_eager_mark_pnl() {
     assert_price_accrual_refresh_matches_eager_mark_pnl(101, 1, -1);
     assert_price_accrual_refresh_matches_eager_mark_pnl(99, -1, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v13_same_epoch_full_refresh_is_idempotent_after_price_up_settlement() {
+    assert_same_epoch_refresh_idempotent_after_kf_settlement(101, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v13_same_epoch_full_refresh_is_idempotent_after_price_down_settlement() {
+    assert_same_epoch_refresh_idempotent_after_kf_settlement(99, -1);
+}
+
+fn assert_same_epoch_refresh_idempotent_after_kf_settlement(new_price: u64, expected_pnl: i128) {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    group.assets[0].effective_price = 100;
+    group.assets[0].fund_px_last = 100;
+    group.assets[0].raw_oracle_target_price = 100;
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group
+        .attach_leg(&mut account, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+
+    group
+        .accrue_asset_to_not_atomic(0, 1, new_price, 0, true)
+        .unwrap();
+    group
+        .full_account_refresh(&mut account, &[new_price; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    let pnl_after_first = account.pnl;
+    let leg_after_first = account.legs[0];
+    let cert_equity_after_first = account.health_cert.certified_equity;
+    let cert_initial_after_first = account.health_cert.certified_initial_req;
+    let cert_maintenance_after_first = account.health_cert.certified_maintenance_req;
+    let cert_deficit_after_first = account.health_cert.certified_liq_deficit;
+    let pnl_pos_tot_after_first = group.pnl_pos_tot;
+    let negative_count_after_first = group.negative_pnl_account_count;
+
+    kani::cover!(
+        pnl_after_first == expected_pnl,
+        "v13 idempotent refresh exercises nonzero settled K/F pnl"
+    );
+    group
+        .full_account_refresh(&mut account, &[new_price; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(account.pnl, pnl_after_first);
+    assert_eq!(account.legs[0].active, leg_after_first.active);
+    assert_eq!(account.legs[0].side, leg_after_first.side);
+    assert_eq!(account.legs[0].basis_pos_q, leg_after_first.basis_pos_q);
+    assert_eq!(account.legs[0].a_basis, leg_after_first.a_basis);
+    assert_eq!(account.legs[0].k_snap, leg_after_first.k_snap);
+    assert_eq!(account.legs[0].f_snap, leg_after_first.f_snap);
+    assert_eq!(account.legs[0].epoch_snap, leg_after_first.epoch_snap);
+    assert_eq!(account.health_cert.certified_equity, cert_equity_after_first);
+    assert_eq!(
+        account.health_cert.certified_initial_req,
+        cert_initial_after_first
+    );
+    assert_eq!(
+        account.health_cert.certified_maintenance_req,
+        cert_maintenance_after_first
+    );
+    assert_eq!(
+        account.health_cert.certified_liq_deficit,
+        cert_deficit_after_first
+    );
+    assert_eq!(group.pnl_pos_tot, pnl_pos_tot_after_first);
+    assert_eq!(group.negative_pnl_account_count, negative_count_after_first);
 }
 
 fn assert_price_accrual_refresh_matches_eager_mark_pnl(
