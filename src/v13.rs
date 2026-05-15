@@ -860,6 +860,7 @@ pub enum ResolvedCloseOutcomeV13 {
 }
 
 impl MarketGroupV13 {
+    #[cfg(not(target_os = "solana"))]
     pub fn new(market_group_id: [u8; 32], config: V13Config) -> V13Result<Self> {
         config.validate_public_user_fund()?;
         Ok(Self {
@@ -1780,6 +1781,7 @@ impl MarketGroupV13 {
         })
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn execute_trade_with_fee_not_atomic(
         &mut self,
         long_account: &mut PortfolioAccountV13,
@@ -1800,6 +1802,16 @@ impl MarketGroupV13 {
         *long_account = staged_long;
         *short_account = staged_short;
         Ok(outcome)
+    }
+
+    pub fn execute_trade_with_fee_in_place_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioAccountV13,
+        short_account: &mut PortfolioAccountV13,
+        request: TradeRequestV13,
+        effective_prices: &[u64; V13_MAX_PORTFOLIO_ASSETS_N],
+    ) -> V13Result<TradeOutcomeV13> {
+        self.execute_trade_with_fee_inner(long_account, short_account, request, effective_prices)
     }
 
     fn execute_trade_with_fee_inner(

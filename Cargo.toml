@@ -32,7 +32,10 @@ inherits = "release"
 panic = "abort"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(kani)',
+    'cfg(target_os, values("solana"))',
+] }
 
 [workspace.metadata.kani]
 flags = { tests = true }
