@@ -889,6 +889,80 @@ fn proof_v13_global_residual_is_not_account_health_proof() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_cross_margin_equity_counts_collateral_once_and_score_uses_full_envelope() {
+    let capital_units: u8 = kani::any();
+    let debt_units: u8 = kani::any();
+    let certified_loss_units: u8 = kani::any();
+    kani::assume(capital_units <= 5);
+    kani::assume(debt_units <= 5);
+    kani::assume(certified_loss_units > 0);
+    kani::assume(certified_loss_units <= 5);
+    let capital = capital_units as u128;
+    let debt = debt_units as i128;
+    let certified_loss = certified_loss_units as u128;
+    let (market, account_id, owner) = concrete_ids();
+    let group = MarketGroupV13::new(market, V13Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    account.capital = capital;
+    account.fee_credits = -debt;
+    account.active_bitmap = 0b11;
+    account.legs[0] = PortfolioLegV13 {
+        active: true,
+        side: SideV13::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    account.legs[1] = PortfolioLegV13 {
+        active: true,
+        side: SideV13::Short,
+        basis_pos_q: -(POS_SCALE as i128),
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+
+    let equity = account_equity(&account).unwrap();
+    let expected = (capital as i128) - debt;
+
+    kani::cover!(
+        account.active_bitmap == 0b11,
+        "v13 two active legs reachable for single-collateral equity"
+    );
+    assert_eq!(equity, expected);
+
+    let mut cert_account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    cert_account.health_cert.valid = true;
+    cert_account.health_cert.certified_worst_case_loss = certified_loss;
+    let score = group.risk_score(&cert_account).unwrap();
+
+    kani::cover!(
+        certified_loss > 1,
+        "v13 full certified loss envelope reaches risk score"
+    );
+    assert_eq!(score.gross_risk_notional, certified_loss);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_full_refresh_clears_stale_certificate() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();

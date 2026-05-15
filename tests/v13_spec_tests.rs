@@ -219,6 +219,29 @@ fn v13_global_residual_is_not_account_health_proof() {
 }
 
 #[test]
+fn v13_cross_margin_collateral_counted_once_and_not_below_loss_envelope() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 1_000_000).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut a, 1, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+    let prices = [1_000_000; V13_MAX_PORTFOLIO_ASSETS_N];
+
+    let cert = g.full_account_refresh(&mut a, &prices).unwrap();
+    let leg0_loss = risk_notional_ceil(POS_SCALE, prices[0]).unwrap();
+    let leg1_loss = risk_notional_ceil(POS_SCALE, prices[1]).unwrap();
+    let envelope = leg0_loss + leg1_loss;
+
+    assert_eq!(cert.certified_equity, account_equity(&a).unwrap());
+    assert_eq!(cert.certified_equity, 1_000_000);
+    assert_eq!(cert.certified_worst_case_loss, envelope);
+    assert_eq!(cert.certified_maintenance_req, envelope);
+    assert_eq!(cert.certified_liq_deficit, envelope - 1_000_000);
+}
+
+#[test]
 fn v13_b_stale_blocks_refresh_and_favorable_actions_without_scanning_market() {
     let mut g = group();
     let mut a = account();
