@@ -619,6 +619,47 @@ fn proof_v13_partial_withdraw_can_leave_small_remainder() {
 }
 
 #[kani::proof]
+#[kani::unwind(45)]
+#[kani::solver(cadical)]
+fn proof_v13_over_withdraw_rejects_before_any_accounting_mutation() {
+    let capital: u16 = kani::any();
+    kani::assume(capital > 0);
+    kani::assume(capital <= 1_000);
+    let (market, account_id, owner) = symbolic_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group
+        .deposit_not_atomic(&mut account, capital as u128)
+        .unwrap();
+    let capital_before = account.capital;
+    let pnl_before = account.pnl;
+    let fee_credits_before = account.fee_credits;
+    let active_bitmap_before = account.active_bitmap;
+    let legs_before = account.legs;
+    let vault_before = group.vault;
+    let c_tot_before = group.c_tot;
+    let insurance_before = group.insurance;
+
+    let result = group.withdraw_not_atomic(
+        &mut account,
+        capital as u128 + 1,
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(capital > 0, "v13 over-withdraw rejection path reachable");
+    assert_eq!(result, Err(V13Error::LockActive));
+    assert_eq!(account.capital, capital_before);
+    assert_eq!(account.pnl, pnl_before);
+    assert_eq!(account.fee_credits, fee_credits_before);
+    assert_eq!(account.active_bitmap, active_bitmap_before);
+    assert_eq!(account.legs, legs_before);
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(group.c_tot, c_tot_before);
+    assert_eq!(group.insurance, insurance_before);
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_multiple_deposits_aggregate_c_tot_and_vault() {

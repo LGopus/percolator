@@ -598,6 +598,33 @@ fn v13_partial_withdraw_can_leave_small_remainder() {
 }
 
 #[test]
+fn v13_over_withdraw_rejects_before_any_accounting_mutation() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 10).unwrap();
+    let capital_before = a.capital;
+    let pnl_before = a.pnl;
+    let fee_credits_before = a.fee_credits;
+    let active_bitmap_before = a.active_bitmap;
+    let legs_before = a.legs;
+    let vault_before = g.vault;
+    let c_tot_before = g.c_tot;
+    let insurance_before = g.insurance;
+
+    let res = g.withdraw_not_atomic(&mut a, 11, &[1; V13_MAX_PORTFOLIO_ASSETS_N]);
+
+    assert_eq!(res, Err(V13Error::LockActive));
+    assert_eq!(a.capital, capital_before);
+    assert_eq!(a.pnl, pnl_before);
+    assert_eq!(a.fee_credits, fee_credits_before);
+    assert_eq!(a.active_bitmap, active_bitmap_before);
+    assert_eq!(a.legs, legs_before);
+    assert_eq!(g.vault, vault_before);
+    assert_eq!(g.c_tot, c_tot_before);
+    assert_eq!(g.insurance, insurance_before);
+}
+
+#[test]
 fn v13_close_portfolio_account_requires_clean_local_state() {
     let mut g = group();
     let mut a = account();
