@@ -755,6 +755,28 @@ fn v13_resolved_close_is_bounded_and_fee_current() {
 }
 
 #[test]
+fn v13_resolved_close_returns_progress_after_partial_b_settlement() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, 1).unwrap();
+    g.assets[0].b_long_num = SOCIAL_LOSS_DEN * 2;
+    g.resolve_market_not_atomic(10).unwrap();
+
+    let out = g.close_resolved_account_not_atomic(&mut a, 1).unwrap();
+
+    assert_eq!(out, ResolvedCloseOutcomeV13::ProgressOnly);
+    assert!(a.legs[0].b_stale);
+    assert!(a.legs[0].b_snap > 0);
+    assert!(a.legs[0].b_snap < g.assets[0].b_long_num);
+    assert_eq!(a.last_fee_slot, 0);
+    assert_eq!(a.active_bitmap, 1);
+}
+
+#[test]
 fn v13_resolved_positive_payout_uses_stable_snapshot_denominator() {
     let mut g = group();
     let mut a = account();

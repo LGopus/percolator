@@ -585,6 +585,36 @@ fn proof_v13_resolved_positive_payout_snapshot_is_order_stable() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
+fn proof_v13_resolved_close_partial_b_settlement_makes_progress_without_closing() {
+    let larger_target: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 1);
+    cfg.public_b_chunk_atoms = 1;
+    let mut group = MarketGroupV13::new(market, cfg).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+
+    group.deposit_not_atomic(&mut account, 100).unwrap();
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+    group.assets[0].b_long_num = if larger_target { 3 } else { 2 };
+    group.resolve_market_not_atomic(10).unwrap();
+
+    let outcome = group.close_resolved_account_not_atomic(&mut account, 1);
+
+    kani::cover!(!larger_target, "v13 resolved close partial B target two");
+    kani::cover!(larger_target, "v13 resolved close partial B target three");
+    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV13::ProgressOnly));
+    assert!(account.legs[0].b_stale);
+    assert!(account.legs[0].b_snap > 0);
+    assert!(account.legs[0].b_snap < group.assets[0].b_long_num);
+    assert_eq!(account.last_fee_slot, 0);
+    assert_ne!(account.active_bitmap, 0);
+    assert!(!group.payout_snapshot_captured);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
 fn proof_v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();

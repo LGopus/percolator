@@ -1650,7 +1650,12 @@ impl MarketGroupV13 {
         if self.mode != MarketModeV13::Resolved {
             return Err(V13Error::LockActive);
         }
-        self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
+        if let PermissionlessProgressOutcomeV13::AccountBChunk(_) =
+            self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?
+        {
+            self.assert_public_invariants()?;
+            return Ok(ResolvedCloseOutcomeV13::ProgressOnly);
+        }
         self.sync_account_fee_to_slot_not_atomic(account, self.resolved_slot, fee_rate_per_slot)?;
         self.settle_negative_pnl_from_principal(account)?;
         self.consume_insurance_for_negative_pnl(account)?;
