@@ -4020,7 +4020,7 @@ fn proof_v14_resolved_close_partial_b_settlement_makes_progress_without_closing(
 #[kani::solver(cadical)]
 fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     let blocker: u8 = kani::any();
-    kani::assume(blocker < 8);
+    kani::assume(blocker < 9);
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
@@ -4038,7 +4038,8 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
         4 => group.assets[0].stored_pos_count_long = 1,
         5 => group.assets[0].stored_pos_count_short = 1,
         6 => group.assets[0].stale_account_count_long = 1,
-        _ => group.assets[0].stale_account_count_short = 1,
+        7 => group.assets[0].stale_account_count_short = 1,
+        _ => group.pending_domain_loss_barriers[1] = 1,
     }
 
     let vault_before = group.vault;
@@ -4051,6 +4052,10 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     kani::cover!(
         blocker == 7,
         "v14 resolved readiness stale short-count blocker"
+    );
+    kani::cover!(
+        blocker == 8,
+        "v14 resolved readiness pending-domain-loss barrier blocker"
     );
     assert_eq!(outcome, Ok(ResolvedCloseOutcomeV14::ProgressOnly));
     assert_eq!(group.vault, vault_before);

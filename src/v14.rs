@@ -4597,6 +4597,14 @@ impl MarketGroupV14 {
         {
             return false;
         }
+        let active_domains = self.config.max_portfolio_assets as usize * 2;
+        let mut d = 0;
+        while d < active_domains {
+            if self.pending_domain_loss_barriers[d] != 0 {
+                return false;
+            }
+            d += 1;
+        }
         for i in 0..self.config.max_portfolio_assets as usize {
             let asset = self.assets[i];
             if asset.stored_pos_count_long != 0

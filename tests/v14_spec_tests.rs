@@ -3677,6 +3677,34 @@ fn v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
 }
 
 #[test]
+fn v14_resolved_positive_payout_waits_for_pending_domain_loss_barrier() {
+    let mut g = group();
+    let mut a = account();
+    g.vault = 10;
+    a.pnl = 10;
+    g.pnl_pos_tot = 10;
+    g.pnl_pos_bound_tot = 10;
+    g.resolve_market_not_atomic(1).unwrap();
+    g.pending_domain_loss_barriers[1] = 1;
+
+    let vault_before = g.vault;
+    let pnl_pos_before = g.pnl_pos_tot;
+    let bound_before = g.pnl_pos_bound_tot;
+    let outcome = g.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+
+    assert_eq!(
+        outcome,
+        ResolvedCloseOutcomeV14::ProgressOnly,
+        "pending domain-loss barriers must block positive payout readiness"
+    );
+    assert_eq!(g.vault, vault_before);
+    assert_eq!(g.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(g.pnl_pos_bound_tot, bound_before);
+    assert_eq!(a.pnl, 10);
+    assert!(!g.payout_snapshot_captured);
+}
+
+#[test]
 fn v14_dead_leg_forfeit_is_unavailable_for_normal_live_leg() {
     let mut g = group();
     let mut a = account();
