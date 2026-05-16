@@ -2555,6 +2555,41 @@ fn proof_v14_equity_active_accrual_requires_protective_progress() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group.active_bankrupt_close_present = true;
+    let before_a_long = group.assets[0].a_long;
+    let before_b_short = group.assets[0].b_short_num;
+    let before_oi_long = group.assets[0].oi_eff_long_q;
+
+    let out = group.accrue_asset_to_not_atomic(0, 1, 2, 0, true).unwrap();
+
+    kani::cover!(
+        out.equity_active,
+        "v14 active close accrual remains reachable"
+    );
+    assert!(out.equity_active);
+    assert_eq!(out.dt, 1);
+    assert_eq!(group.assets[0].effective_price, 2);
+    assert_eq!(group.assets[0].a_long, before_a_long);
+    assert_eq!(group.assets[0].b_short_num, before_b_short);
+    assert_eq!(group.assets[0].oi_eff_long_q, before_oi_long);
+    assert!(group.active_bankrupt_close_present);
+    assert_eq!(
+        group.h_lock_lane(Some(&account), false),
+        Ok(HLockLaneV14::HMax)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v14_permissionless_crank_does_not_require_full_market_scan() {
     let stale_count: u16 = kani::any();
     let b_stale_count: u16 = kani::any();

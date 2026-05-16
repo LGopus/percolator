@@ -1380,6 +1380,30 @@ fn v14_equity_active_accrual_commits_one_bounded_loss_stale_segment() {
 }
 
 #[test]
+fn v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.active_bankrupt_close_present = true;
+
+    let a_long_before = g.assets[0].a_long;
+    let b_short_before = g.assets[0].b_short_num;
+    let oi_long_before = g.assets[0].oi_eff_long_q;
+    let out = g
+        .accrue_asset_to_not_atomic(0, 1, 2, 0, true)
+        .expect("close locks must not freeze asset-wide K/F/price/slot accrual");
+
+    assert!(out.equity_active);
+    assert_eq!(out.dt, 1);
+    assert_eq!(g.assets[0].effective_price, 2);
+    assert_eq!(g.assets[0].a_long, a_long_before);
+    assert_eq!(g.assets[0].b_short_num, b_short_before);
+    assert_eq!(g.assets[0].oi_eff_long_q, oi_long_before);
+    assert!(g.active_bankrupt_close_present);
+}
+
+#[test]
 fn v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     let (market, _, _) = ids();
     let mut g = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 10)).unwrap();

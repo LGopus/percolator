@@ -2666,7 +2666,7 @@ impl MarketGroupV14 {
         funding_rate_e9: i128,
         protective_progress_committed: bool,
     ) -> V14Result<AccrueAssetOutcomeV14> {
-        if self.mode != MarketModeV14::Live || self.active_bankrupt_close_present {
+        if self.mode != MarketModeV14::Live {
             return Err(V14Error::LockActive);
         }
         if asset_index >= self.config.max_portfolio_assets as usize
