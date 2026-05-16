@@ -3557,13 +3557,13 @@ fn proof_v14_sign_flip_trade_preserves_oi_symmetry_and_senior_accounting() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_hlock_rejects_risk_increasing_trade_before_mutation() {
+fn proof_v14_hlock_allows_risk_increasing_trade_with_principal_margin() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
     let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
-    group.deposit_not_atomic(&mut long, 10).unwrap();
-    group.deposit_not_atomic(&mut short, 10).unwrap();
+    group.deposit_not_atomic(&mut long, 100).unwrap();
+    group.deposit_not_atomic(&mut short, 100).unwrap();
     group.threshold_stress_active = true;
 
     let result = group.execute_trade_with_fee_not_atomic(
@@ -3578,10 +3578,72 @@ fn proof_v14_hlock_rejects_risk_increasing_trade_before_mutation() {
         &[1; V14_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::LockActive));
-    assert_eq!(long.active_bitmap, 0);
-    assert_eq!(short.active_bitmap, 0);
+    kani::cover!(
+        result.is_ok(),
+        "v14 h-lock risk-increasing trade principal-only margin lane reachable"
+    );
+    assert!(result.is_ok());
+    assert_eq!(long.active_bitmap, 1);
+    assert_eq!(short.active_bitmap, 1);
+    assert_eq!(long.legs[0].basis_pos_q, 1);
+    assert_eq!(short.legs[0].basis_pos_q, -1);
+    assert_eq!(group.assets[0].oi_eff_long_q, 1);
+    assert_eq!(group.assets[0].oi_eff_short_q, 1);
     assert_eq!(group.insurance, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v14_hlock_risk_increasing_trade_rejects_positive_credit_dependency_without_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    long.pnl = 10;
+    short.pnl = 10;
+    group.pnl_pos_tot = 20;
+    group.pnl_pos_bound_tot = 20;
+    group.vault = 20;
+    group.threshold_stress_active = true;
+
+    let before_vault = group.vault;
+    let before_insurance = group.insurance;
+    let before_c_tot = group.c_tot;
+    let before_pnl_pos_tot = group.pnl_pos_tot;
+    let before_pnl_pos_bound_tot = group.pnl_pos_bound_tot;
+    let before_long_active = long.active_bitmap;
+    let before_short_active = short.active_bitmap;
+    let before_long_pnl = long.pnl;
+    let before_short_pnl = short.pnl;
+    let result = group.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV14 {
+            asset_index: 0,
+            size_q: 1,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        result == Err(V14Error::LockActive),
+        "v14 h-lock risk-increasing positive-credit dependency rejection reachable"
+    );
+    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(group.vault, before_vault);
+    assert_eq!(group.insurance, before_insurance);
+    assert_eq!(group.c_tot, before_c_tot);
+    assert_eq!(group.pnl_pos_tot, before_pnl_pos_tot);
+    assert_eq!(group.pnl_pos_bound_tot, before_pnl_pos_bound_tot);
+    assert_eq!(long.active_bitmap, before_long_active);
+    assert_eq!(short.active_bitmap, before_short_active);
+    assert_eq!(long.pnl, before_long_pnl);
+    assert_eq!(short.pnl, before_short_pnl);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
 }
 
 #[kani::proof]

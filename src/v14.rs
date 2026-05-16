@@ -2889,7 +2889,7 @@ impl MarketGroupV14 {
         if touches_pending_domain_barrier {
             return Err(V14Error::LockActive);
         }
-        if risk_increasing && (locked || target_effective_lag) {
+        if risk_increasing && (self.loss_stale_active || target_effective_lag) {
             return Err(V14Error::LockActive);
         }
 

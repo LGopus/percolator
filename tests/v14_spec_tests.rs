@@ -2405,7 +2405,7 @@ fn v14_same_slot_exposed_price_move_rejects_without_mutation() {
 }
 
 #[test]
-fn v14_hlock_blocks_risk_increasing_trade_before_fee_or_position_mutation() {
+fn v14_hlock_allows_risk_increasing_trade_with_no_positive_credit_margin() {
     let mut g = group();
     let mut long = account();
     let mut short = account();
@@ -2414,6 +2414,42 @@ fn v14_hlock_blocks_risk_increasing_trade_before_fee_or_position_mutation() {
     g.deposit_not_atomic(&mut short, 10_000).unwrap();
     g.threshold_stress_active = true;
 
+    let out = g
+        .execute_trade_with_fee_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV14 {
+                asset_index: 0,
+                size_q: POS_SCALE,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.notional, 100);
+    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(short.legs[0].basis_pos_q, -(POS_SCALE as i128));
+    assert_eq!(g.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(g.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(g.insurance, 0);
+}
+
+#[test]
+fn v14_hlock_rejects_risk_increasing_trade_that_needs_positive_pnl_credit() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+    long.pnl = 200;
+    short.pnl = 200;
+    g.pnl_pos_tot = 400;
+    g.pnl_pos_bound_tot = 400;
+    g.vault = 400;
+    g.threshold_stress_active = true;
+
+    let before = (g, long, short);
     let res = g.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
@@ -2427,9 +2463,7 @@ fn v14_hlock_blocks_risk_increasing_trade_before_fee_or_position_mutation() {
     );
 
     assert_eq!(res, Err(V14Error::LockActive));
-    assert_eq!(long.active_bitmap, 0);
-    assert_eq!(short.active_bitmap, 0);
-    assert_eq!(g.insurance, 0);
+    assert_eq!((g, long, short), before);
 }
 
 #[test]
