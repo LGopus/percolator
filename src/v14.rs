@@ -3791,6 +3791,23 @@ impl MarketGroupV14 {
         }
     }
 
+    fn side_mode_for(&self, asset_index: usize, side: SideV14) -> V14Result<SideModeV14> {
+        if asset_index >= self.config.max_portfolio_assets as usize {
+            return Err(V14Error::InvalidLeg);
+        }
+        let asset = self.assets[asset_index];
+        Ok(match side {
+            SideV14::Long => asset.mode_long,
+            SideV14::Short => asset.mode_short,
+        })
+    }
+
+    fn leg_is_dead_for_forfeit(&self, asset_index: usize, side: SideV14) -> V14Result<bool> {
+        let side_mode = self.side_mode_for(asset_index, side)?;
+        Ok(self.mode == MarketModeV14::Recovery
+            || matches!(side_mode, SideModeV14::DrainOnly | SideModeV14::ResetPending))
+    }
+
     fn kf_target_for_leg(
         &self,
         asset_index: usize,
@@ -4156,6 +4173,56 @@ impl MarketGroupV14 {
         account.legs[asset_index].f_snap = f_now;
         account.health_cert.valid = false;
         Ok(())
+    }
+
+    fn settle_forfeited_leg_kf_effects(
+        &mut self,
+        account: &mut PortfolioAccountV14,
+        asset_index: usize,
+    ) -> V14Result<(u128, u128)> {
+        let leg = account.legs[asset_index];
+        if !leg.active {
+            return Ok((0, 0));
+        }
+        let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
+        let den = leg
+            .a_basis
+            .checked_mul(POS_SCALE)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        let k_delta = wide_signed_mul_div_floor_from_k_pair(
+            leg.basis_pos_q.unsigned_abs(),
+            leg.k_snap,
+            k_now,
+            den,
+        );
+        let f_delta = wide_signed_mul_div_floor_from_k_pair(
+            leg.basis_pos_q.unsigned_abs(),
+            leg.f_snap,
+            f_now,
+            den,
+        );
+        let net = k_delta
+            .checked_add(f_delta)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        validate_non_min_i128(net)?;
+
+        let mut loss_settled = 0u128;
+        let mut positive_pnl_forfeited = 0u128;
+        if net < 0 {
+            loss_settled = net.unsigned_abs();
+            let new_pnl = account
+                .pnl
+                .checked_add(net)
+                .ok_or(V14Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, new_pnl)?;
+        } else {
+            positive_pnl_forfeited = net as u128;
+        }
+
+        account.legs[asset_index].k_snap = k_now;
+        account.legs[asset_index].f_snap = f_now;
+        account.health_cert.valid = false;
+        Ok((loss_settled, positive_pnl_forfeited))
     }
 
     fn apply_position_delta(
