@@ -1853,6 +1853,11 @@ impl MarketGroupV14 {
         if ledger.finalized && ledger.residual_remaining != 0 {
             return Err(V14Error::InvalidLeg);
         }
+        if ledger.quantity_adl_applied_q != 0
+            && (!ledger.finalized || ledger.residual_remaining != 0)
+        {
+            return Err(V14Error::InvalidLeg);
+        }
         Ok(())
     }
 
@@ -1885,6 +1890,12 @@ impl MarketGroupV14 {
                 }
             } else {
                 validate_active_leg(leg)?;
+            }
+        }
+        if account.close_progress.quantity_adl_applied_q != 0 {
+            let i = account.close_progress.asset_index as usize;
+            if i >= n || account.legs[i].active {
+                return Err(V14Error::InvalidLeg);
             }
         }
         Ok(())

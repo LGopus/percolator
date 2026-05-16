@@ -2639,6 +2639,49 @@ fn v14_quantity_adl_requires_finalized_matching_close_ledger() {
 }
 
 #[test]
+fn v14_account_shape_rejects_malformed_quantity_adl_close_progress() {
+    let mut g = group();
+    let mut premature = account();
+    premature.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: false,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 2,
+        b_loss_booked: 1,
+        residual_remaining: 1,
+        quantity_adl_applied_q: 1,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    assert_eq!(
+        g.validate_account_shape(&premature),
+        Err(V14Error::InvalidLeg),
+        "quantity ADL cannot be durable before residual finalization"
+    );
+
+    let mut still_open = account();
+    g.attach_leg(&mut still_open, 0, SideV14::Long, 4).unwrap();
+    still_open.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 1,
+        explicit_loss_assigned: 1,
+        residual_remaining: 0,
+        quantity_adl_applied_q: 4,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    assert_eq!(
+        g.validate_account_shape(&still_open),
+        Err(V14Error::InvalidLeg),
+        "quantity ADL and closing exposure clear must stay atomic"
+    );
+}
+
+#[test]
 fn v14_permissionless_crank_commits_refresh_before_equity_active_accrual() {
     let mut g = group();
     let mut long = account();
