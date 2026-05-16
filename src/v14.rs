@@ -2888,6 +2888,22 @@ impl MarketGroupV14 {
             return Err(V14Error::InvalidLeg);
         }
         let close_q = request.close_q.min(leg.basis_pos_q.unsigned_abs());
+        let uncovered_loss_after_principal = if account.pnl < 0 {
+            account.pnl.unsigned_abs().saturating_sub(account.capital)
+        } else {
+            0
+        };
+        let remaining_active_bitmap = if close_q == leg.basis_pos_q.unsigned_abs() {
+            account.active_bitmap & !(1u32 << request.asset_index)
+        } else {
+            account.active_bitmap
+        };
+        if uncovered_loss_after_principal != 0 && remaining_active_bitmap != 0 {
+            self.declare_permissionless_recovery(
+                PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
+            )?;
+            return Err(V14Error::RecoveryRequired);
+        }
         self.preflight_liquidation_residual_durability(request.asset_index, leg.side, account)?;
         let fee_notional = risk_notional_ceil(close_q, effective_prices[request.asset_index])?;
         let fee = checked_fee_bps(fee_notional, request.fee_bps)?

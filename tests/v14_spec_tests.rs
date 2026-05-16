@@ -3041,6 +3041,38 @@ fn v14_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
 }
 
 #[test]
+fn v14_partial_liquidation_cannot_b_book_residual_while_open_risk_remains() {
+    let mut g = group();
+    let mut bankrupt = account();
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [42; 32], [3; 32]));
+    g.attach_leg(&mut bankrupt, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].k_long = -(100 * ADL_ONE as i128);
+
+    let before_b_short = g.assets[0].b_short_num;
+    let res = g.liquidate_account_not_atomic(
+        &mut bankrupt,
+        LiquidationRequestV14 {
+            asset_index: 0,
+            close_q: POS_SCALE / 2,
+            fee_bps: 0,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V14Error::RecoveryRequired));
+    assert_eq!(
+        g.assets[0].b_short_num, before_b_short,
+        "partial liquidation must not socialize residual while the account still has closable risk"
+    );
+    assert!(bankrupt.legs[0].active);
+    assert_eq!(bankrupt.legs[0].basis_pos_q.unsigned_abs(), POS_SCALE);
+}
+
+#[test]
 fn v14_liquidation_rejects_zero_close_before_mutation() {
     let mut g = group();
     let mut a = account();

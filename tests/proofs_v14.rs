@@ -4558,6 +4558,53 @@ fn proof_v14_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
 }
 
 #[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v14_partial_liquidation_cannot_socialize_residual_while_open_risk_remains() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+
+    group
+        .attach_leg(&mut bankrupt, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group.assets[0].k_long = -(100 * ADL_ONE as i128);
+    let before_b_short = group.assets[0].b_short_num;
+    let before_basis = bankrupt.legs[0].basis_pos_q;
+    let before_bitmap = bankrupt.active_bitmap;
+    let before_b_loss_booked = bankrupt.close_progress.b_loss_booked;
+
+    let result = group.liquidate_account_not_atomic(
+        &mut bankrupt,
+        LiquidationRequestV14 {
+            asset_index: 0,
+            close_q: POS_SCALE / 2,
+            fee_bps: 0,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        result == Err(V14Error::RecoveryRequired),
+        "v14 partial liquidation residual routes to recovery before B booking"
+    );
+    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(group.assets[0].b_short_num, before_b_short);
+    assert_eq!(bankrupt.close_progress.b_loss_booked, before_b_loss_booked);
+    assert_eq!(bankrupt.legs[0].basis_pos_q, before_basis);
+    assert_eq!(bankrupt.active_bitmap, before_bitmap);
+}
+
+#[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
 fn proof_v14_liquidation_rejects_zero_close_before_mutation() {
