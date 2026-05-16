@@ -3161,6 +3161,9 @@ impl MarketGroupV14 {
         self.validate_account_shape(account)?;
         let protective_progress = match request.action {
             PermissionlessCrankActionV14::Refresh => {
+                let touches_accrued_asset = request.asset_index
+                    < self.config.max_portfolio_assets as usize
+                    && account.legs[request.asset_index].active;
                 if let PermissionlessProgressOutcomeV14::AccountBChunk(out) = self
                     .settle_account_side_effects_not_atomic(
                         account,
@@ -3171,7 +3174,7 @@ impl MarketGroupV14 {
                     return Ok(PermissionlessProgressOutcomeV14::AccountBChunk(out));
                 }
                 self.full_account_refresh(account, effective_prices)?;
-                true
+                touches_accrued_asset
             }
             PermissionlessCrankActionV14::SettleB { asset_index } => {
                 let out = self.settle_account_b_chunk(
@@ -3182,8 +3185,9 @@ impl MarketGroupV14 {
                 return Ok(PermissionlessProgressOutcomeV14::AccountBChunk(out));
             }
             PermissionlessCrankActionV14::Liquidate(liq) => {
+                let liquidated_asset_index = liq.asset_index;
                 self.liquidate_account_not_atomic(account, liq, effective_prices)?;
-                true
+                liquidated_asset_index == request.asset_index
             }
             PermissionlessCrankActionV14::Recover(reason) => {
                 return self.declare_permissionless_recovery(reason);

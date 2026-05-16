@@ -2810,6 +2810,68 @@ fn v14_permissionless_crank_commits_refresh_before_equity_active_accrual() {
 }
 
 #[test]
+fn v14_permissionless_crank_flat_refresh_is_not_protective_for_equity_active_accrual() {
+    let mut g = group();
+    let mut long = account();
+    let mut short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [44; 32], [3; 32]));
+    let mut flat = PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [45; 32], [3; 32]));
+    g.deposit_not_atomic(&mut flat, 1).unwrap();
+    g.attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    let before_asset = g.assets[0];
+    let before_slot = g.slot_last;
+
+    let res = g.permissionless_crank_not_atomic(
+        &mut flat,
+        PermissionlessCrankRequestV14 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 2,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV14::Refresh,
+        },
+        &[2; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V14Error::NonProgress));
+    assert_eq!(g.assets[0], before_asset);
+    assert_eq!(g.slot_last, before_slot);
+}
+
+#[test]
+fn v14_permissionless_crank_cross_asset_liquidation_is_not_protective_for_accrued_asset() {
+    let (market, _, _) = ids();
+    let mut g = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 10)).unwrap();
+    let mut victim = account();
+    g.assets[0].oi_eff_long_q = 1;
+    g.assets[0].oi_eff_short_q = 1;
+    g.attach_leg(&mut victim, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    let before_asset = g.assets[0];
+    let before_slot = g.slot_last;
+    let req = PermissionlessCrankRequestV14 {
+        now_slot: 1,
+        asset_index: 0,
+        effective_price: 2,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV14::Liquidate(LiquidationRequestV14 {
+            asset_index: 1,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+        }),
+    };
+
+    let res = g.permissionless_crank_not_atomic(&mut victim, req, &[1; V14_MAX_PORTFOLIO_ASSETS_N]);
+
+    assert_eq!(res, Err(V14Error::NonProgress));
+    assert_eq!(g.assets[0], before_asset);
+    assert_eq!(g.slot_last, before_slot);
+}
+
+#[test]
 fn v14_permissionless_crank_does_not_require_full_market_scan() {
     let mut g = group();
     let mut hinted = account();

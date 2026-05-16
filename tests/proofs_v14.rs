@@ -2680,6 +2680,82 @@ fn proof_v14_permissionless_refresh_returns_partial_b_progress_without_accrual()
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v14_permissionless_flat_refresh_is_not_protective_for_equity_active_accrual() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    group.assets[0].oi_eff_long_q = 1;
+    group.assets[0].oi_eff_short_q = 1;
+    let before_asset = group.assets[0];
+    let before_slot = group.slot_last;
+
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 1).unwrap();
+
+    let outcome = group.permissionless_crank_not_atomic(
+        &mut account,
+        PermissionlessCrankRequestV14 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 2,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV14::Refresh,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        outcome == Err(V14Error::NonProgress),
+        "v14 flat refresh is not protective for exposed asset accrual"
+    );
+    assert_eq!(outcome, Err(V14Error::NonProgress));
+    assert_eq!(group.assets[0], before_asset);
+    assert_eq!(group.slot_last, before_slot);
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v14_permissionless_cross_asset_liquidation_is_not_protective_for_equity_active_accrual() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    group.assets[0].oi_eff_long_q = 1;
+    group.assets[0].oi_eff_short_q = 1;
+    let before_asset = group.assets[0];
+    let before_slot = group.slot_last;
+
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.attach_leg(&mut account, 1, SideV14::Long, 1).unwrap();
+
+    let outcome = group.permissionless_crank_not_atomic(
+        &mut account,
+        PermissionlessCrankRequestV14 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 2,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV14::Liquidate(LiquidationRequestV14 {
+                asset_index: 1,
+                close_q: 1,
+                fee_bps: 0,
+            }),
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        outcome == Err(V14Error::NonProgress),
+        "v14 cross-asset liquidation is not protective for exposed asset accrual"
+    );
+    assert_eq!(outcome, Err(V14Error::NonProgress));
+    assert_eq!(group.assets[0], before_asset);
+    assert_eq!(group.slot_last, before_slot);
+}
+
+#[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
 fn proof_v14_worst_case_hinted_progress_actions_are_total_and_bounded() {
