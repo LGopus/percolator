@@ -2234,6 +2234,55 @@ fn proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [11; 32], owner));
+    group.mode = MarketModeV14::Recovery;
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group.assets[0].mode_long = SideModeV14::DrainOnly;
+    group.assets[0].k_long = -(100 * ADL_ONE as i128);
+    account.pnl = 100;
+    group.pnl_pos_tot = 100;
+    group.pnl_pos_bound_tot = 100;
+    group.vault = 50;
+
+    let out = group
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, 50)
+        .unwrap();
+
+    kani::cover!(
+        out.support_consumed == 50 && out.junior_face_burned == 100,
+        "v14 impaired positive support burns full face for haircut value"
+    );
+    assert!(out.detached);
+    assert_eq!(out.loss_settled, 100);
+    assert_eq!(out.support_consumed, 50);
+    assert_eq!(out.junior_face_burned, 100);
+    assert_eq!(out.residual_booked, 50);
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(group.pnl_pos_tot, 0);
+    assert_eq!(group.pnl_pos_bound_tot, 0);
+    assert!(group.assets[0].b_short_num > 0);
+    assert_eq!(account.close_progress.gross_loss_at_close_start, 100);
+    assert_eq!(account.close_progress.support_consumed, 50);
+    assert_eq!(account.close_progress.junior_face_burned, 100);
+    assert!(account.close_progress.finalized);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_fee_charge_settles_loss_before_fee() {

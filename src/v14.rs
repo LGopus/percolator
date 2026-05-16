@@ -889,10 +889,18 @@ pub struct DeadLegForfeitOutcomeV14 {
     pub detached: bool,
     pub positive_pnl_forfeited: u128,
     pub loss_settled: u128,
+    pub support_consumed: u128,
+    pub junior_face_burned: u128,
     pub principal_used: u128,
     pub insurance_used: u128,
     pub residual_booked: u128,
     pub explicit_loss: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SupportLossApplicationV14 {
+    support_consumed: u128,
+    junior_face_burned: u128,
 }
 
 #[repr(C)]
@@ -2967,7 +2975,7 @@ impl MarketGroupV14 {
             return Err(V14Error::LockActive);
         }
 
-        let (loss_settled, positive_pnl_forfeited) =
+        let (loss_settled, positive_pnl_forfeited, support_consumed, junior_face_burned) =
             self.settle_forfeited_leg_kf_effects(account, asset_index)?;
 
         let mut total_loss_settled = loss_settled;
@@ -2984,6 +2992,8 @@ impl MarketGroupV14 {
                     detached: false,
                     positive_pnl_forfeited,
                     loss_settled: total_loss_settled,
+                    support_consumed,
+                    junior_face_burned,
                     principal_used: 0,
                     insurance_used: 0,
                     residual_booked: 0,
@@ -2993,18 +3003,31 @@ impl MarketGroupV14 {
         }
 
         let principal_used = self.settle_negative_pnl_from_principal(account)?;
-        let gross_bankruptcy_residual = if account.pnl < 0 {
+        let bankruptcy_residual_after_principal = if account.pnl < 0 {
             account.pnl.unsigned_abs()
         } else {
             0
         };
-        if gross_bankruptcy_residual != 0 {
+        let gross_close_loss = bankruptcy_residual_after_principal
+            .checked_add(support_consumed)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        if gross_close_loss != 0 {
             self.begin_close_progress_ledger(
                 account,
                 asset_index,
                 opposite_side(leg.side),
-                gross_bankruptcy_residual,
+                gross_close_loss,
             )?;
+            if support_consumed != 0 {
+                self.advance_close_progress_ledger(
+                    account,
+                    support_consumed,
+                    junior_face_burned,
+                    0,
+                    0,
+                    0,
+                )?;
+            }
         }
 
         let insurance_used =
@@ -3053,6 +3076,8 @@ impl MarketGroupV14 {
             detached,
             positive_pnl_forfeited,
             loss_settled: total_loss_settled,
+            support_consumed,
+            junior_face_burned,
             principal_used,
             insurance_used,
             residual_booked,
@@ -4046,6 +4071,71 @@ impl MarketGroupV14 {
         .ok_or(V14Error::ArithmeticOverflow)
     }
 
+    fn apply_haircut_bounded_close_loss_to_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV14,
+        loss_abs: u128,
+    ) -> V14Result<SupportLossApplicationV14> {
+        if loss_abs == 0 {
+            return Ok(SupportLossApplicationV14 {
+                support_consumed: 0,
+                junior_face_burned: 0,
+            });
+        }
+
+        let old_positive_face = account.pnl.max(0) as u128;
+        if old_positive_face == 0 {
+            let loss_i128 = i128::try_from(loss_abs).map_err(|_| V14Error::ArithmeticOverflow)?;
+            let new_pnl = account
+                .pnl
+                .checked_sub(loss_i128)
+                .ok_or(V14Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, new_pnl)?;
+            return Ok(SupportLossApplicationV14 {
+                support_consumed: 0,
+                junior_face_burned: 0,
+            });
+        }
+
+        let residual = self.residual();
+        let junior_bound = self.junior_claim_bound();
+        let effective_available =
+            self.haircut_effective_support(old_positive_face, residual, junior_bound)?;
+        let support_consumed = effective_available.min(loss_abs);
+        let remaining_loss = loss_abs
+            .checked_sub(support_consumed)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        let mut junior_face_burned = if support_consumed == 0 {
+            0
+        } else {
+            self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
+        };
+        if remaining_loss != 0 {
+            junior_face_burned = old_positive_face;
+        }
+        if junior_face_burned > old_positive_face {
+            return Err(V14Error::ArithmeticOverflow);
+        }
+
+        let retained_face = old_positive_face
+            .checked_sub(junior_face_burned)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        let retained_i128 =
+            i128::try_from(retained_face).map_err(|_| V14Error::ArithmeticOverflow)?;
+        let remaining_i128 =
+            i128::try_from(remaining_loss).map_err(|_| V14Error::ArithmeticOverflow)?;
+        let new_pnl = retained_i128
+            .checked_sub(remaining_i128)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        account.reserved_pnl = account.reserved_pnl.min(new_pnl.max(0) as u128);
+        self.set_account_pnl(account, new_pnl)?;
+
+        Ok(SupportLossApplicationV14 {
+            support_consumed,
+            junior_face_burned,
+        })
+    }
+
     fn insurance_domain_index(&self, asset_index: usize, side: SideV14) -> V14Result<usize> {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V14Error::InvalidLeg);
@@ -4305,10 +4395,10 @@ impl MarketGroupV14 {
         &mut self,
         account: &mut PortfolioAccountV14,
         asset_index: usize,
-    ) -> V14Result<(u128, u128)> {
+    ) -> V14Result<(u128, u128, u128, u128)> {
         let leg = account.legs[asset_index];
         if !leg.active {
-            return Ok((0, 0));
+            return Ok((0, 0, 0, 0));
         }
         let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
         let den = leg
@@ -4333,14 +4423,14 @@ impl MarketGroupV14 {
         validate_non_min_i128(net)?;
 
         let mut loss_settled = 0u128;
+        let mut support_consumed = 0u128;
+        let mut junior_face_burned = 0u128;
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
-            let new_pnl = account
-                .pnl
-                .checked_add(net)
-                .ok_or(V14Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+            let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
+            support_consumed = support.support_consumed;
+            junior_face_burned = support.junior_face_burned;
         } else {
             positive_pnl_forfeited = net as u128;
         }
@@ -4348,7 +4438,12 @@ impl MarketGroupV14 {
         account.legs[asset_index].k_snap = k_now;
         account.legs[asset_index].f_snap = f_now;
         account.health_cert.valid = false;
-        Ok((loss_settled, positive_pnl_forfeited))
+        Ok((
+            loss_settled,
+            positive_pnl_forfeited,
+            support_consumed,
+            junior_face_burned,
+        ))
     }
 
     fn apply_position_delta(

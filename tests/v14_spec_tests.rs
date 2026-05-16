@@ -2859,6 +2859,49 @@ fn v14_dead_leg_forfeit_books_negative_residual_to_opposing_domain_only() {
 }
 
 #[test]
+fn v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
+    let mut g = group();
+    let mut bankrupt = account();
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [23; 32], [3; 32]));
+    g.mode = MarketModeV14::Recovery;
+    g.attach_leg(&mut bankrupt, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].mode_long = SideModeV14::DrainOnly;
+    g.assets[0].k_long = -(100 * ADL_ONE as i128);
+
+    bankrupt.pnl = 100;
+    g.pnl_pos_tot = 100;
+    g.pnl_pos_bound_tot = 100;
+    g.vault = 50;
+
+    let out = g
+        .forfeit_recovery_leg_not_atomic(&mut bankrupt, 0, 50)
+        .unwrap();
+
+    assert!(out.detached);
+    assert_eq!(out.loss_settled, 100);
+    assert_eq!(out.support_consumed, 50);
+    assert_eq!(out.junior_face_burned, 100);
+    assert_eq!(out.residual_booked, 50);
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(g.pnl_pos_tot, 0);
+    assert_eq!(g.pnl_pos_bound_tot, 0);
+    assert!(
+        g.assets[0].b_short_num > 0,
+        "haircut-uncovered loss must be durably charged to the opposing domain"
+    );
+    assert_eq!(bankrupt.close_progress.gross_loss_at_close_start, 100);
+    assert_eq!(bankrupt.close_progress.support_consumed, 50);
+    assert_eq!(bankrupt.close_progress.junior_face_burned, 100);
+    assert!(bankrupt.close_progress.finalized);
+    assert!(!bankrupt.legs[0].active);
+}
+
+#[test]
 fn v14_resolved_positive_payout_uses_stable_snapshot_denominator() {
     let mut g = group();
     let mut a = account();
