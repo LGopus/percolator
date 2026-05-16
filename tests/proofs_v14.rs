@@ -659,7 +659,7 @@ fn proof_v14_authoritatively_flat_account_never_receives_b_loss() {
 #[kani::solver(cadical)]
 fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
     let case: u8 = kani::any();
-    kani::assume(case < 12);
+    kani::assume(case < 13);
     let (market, _, _) = symbolic_ids();
     let mut cfg = V14Config::public_user_fund(1, 0, 1);
     match case {
@@ -674,7 +674,8 @@ fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
         8 => cfg.full_refresh_required_for_favorable_actions = false,
         9 => cfg.public_liveness_profile_crank_forward = false,
         10 => cfg.max_account_b_settlement_chunks = 0,
-        _ => cfg.max_bankrupt_close_chunks = 0,
+        11 => cfg.max_bankrupt_close_chunks = 0,
+        _ => cfg.max_bankrupt_close_lifetime_slots = 0,
     }
 
     kani::cover!(case == 0, "v14 zero portfolio width rejected");
@@ -689,6 +690,7 @@ fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
     kani::cover!(case == 9, "v14 disabled crank-forward profile rejected");
     kani::cover!(case == 10, "v14 zero account B chunk cap rejected");
     kani::cover!(case == 11, "v14 zero bankrupt close chunk cap rejected");
+    kani::cover!(case == 12, "v14 zero bankrupt close lifetime rejected");
     assert_eq!(
         MarketGroupV14::new(market, cfg),
         Err(V14Error::InvalidConfig)
@@ -4310,6 +4312,61 @@ fn proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger() {
     assert_eq!(result, Err(V14Error::LockActive));
     assert_eq!(bankrupt.close_progress, before_ledger);
     assert_eq!(group.assets[1].b_short_num, before_b_short);
+}
+
+#[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
+fn proof_v14_close_lifetime_uses_configured_bound_and_is_not_refreshed() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    cfg.max_bankrupt_close_chunks = 7;
+    cfg.max_bankrupt_close_lifetime_slots = 5;
+    cfg.public_b_chunk_atoms = 1;
+    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    group.current_slot = 11;
+    let mut bankrupt =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut participant =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [44; 32], owner));
+    group
+        .attach_leg(&mut participant, 0, SideV14::Short, -10)
+        .unwrap();
+
+    let first =
+        group.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2);
+    kani::cover!(
+        matches!(first, Ok(out) if out.booked_loss == 1),
+        "v14 first close chunk starts configured-lifetime ledger"
+    );
+    assert!(matches!(first, Ok(out) if out.booked_loss == 1));
+    let first_ledger = bankrupt.close_progress;
+    assert!(first_ledger.active);
+    assert!(!first_ledger.finalized);
+    assert_eq!(first_ledger.drift_reference_slot, 11);
+    assert_eq!(first_ledger.max_close_slot, 16);
+    assert_ne!(
+        first_ledger.max_close_slot,
+        11 + cfg.max_accrual_dt_slots * cfg.max_bankrupt_close_chunks
+    );
+
+    group.current_slot = 12;
+    let second =
+        group.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2);
+    kani::cover!(
+        matches!(second, Ok(out) if out.booked_loss == 1),
+        "v14 close continuation finalizes without refreshing lifetime"
+    );
+    assert!(matches!(second, Ok(out) if out.booked_loss == 1));
+    assert!(bankrupt.close_progress.finalized);
+    assert_eq!(
+        bankrupt.close_progress.drift_reference_slot,
+        first_ledger.drift_reference_slot
+    );
+    assert_eq!(
+        bankrupt.close_progress.max_close_slot,
+        first_ledger.max_close_slot
+    );
 }
 
 #[kani::proof]

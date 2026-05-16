@@ -122,6 +122,7 @@ pub struct V14Config {
     pub max_price_move_bps_per_slot: u64,
     pub max_account_b_settlement_chunks: u64,
     pub max_bankrupt_close_chunks: u64,
+    pub max_bankrupt_close_lifetime_slots: u64,
     pub public_b_chunk_atoms: u128,
     pub permissionless_recovery_enabled: bool,
     pub recovery_fallback_price_enabled: bool,
@@ -150,6 +151,7 @@ impl V14Config {
             max_price_move_bps_per_slot: 10_000,
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
+            max_bankrupt_close_lifetime_slots: 1,
             public_b_chunk_atoms: MAX_VAULT_TVL,
             permissionless_recovery_enabled: true,
             recovery_fallback_price_enabled: true,
@@ -543,6 +545,7 @@ impl V14Config {
             || self.max_price_move_bps_per_slot == 0
             || self.max_account_b_settlement_chunks == 0
             || self.max_bankrupt_close_chunks == 0
+            || self.max_bankrupt_close_lifetime_slots == 0
             || self.public_b_chunk_atoms == 0
         {
             return Err(V14Error::InvalidConfig);
@@ -1138,6 +1141,7 @@ pub struct V14ConfigAccount {
     pub max_price_move_bps_per_slot: V14PodU64,
     pub max_account_b_settlement_chunks: V14PodU64,
     pub max_bankrupt_close_chunks: V14PodU64,
+    pub max_bankrupt_close_lifetime_slots: V14PodU64,
     pub public_b_chunk_atoms: V14PodU128,
     pub permissionless_recovery_enabled: u8,
     pub recovery_fallback_price_enabled: u8,
@@ -1166,6 +1170,9 @@ impl V14ConfigAccount {
             max_price_move_bps_per_slot: V14PodU64::new(value.max_price_move_bps_per_slot),
             max_account_b_settlement_chunks: V14PodU64::new(value.max_account_b_settlement_chunks),
             max_bankrupt_close_chunks: V14PodU64::new(value.max_bankrupt_close_chunks),
+            max_bankrupt_close_lifetime_slots: V14PodU64::new(
+                value.max_bankrupt_close_lifetime_slots,
+            ),
             public_b_chunk_atoms: V14PodU128::new(value.public_b_chunk_atoms),
             permissionless_recovery_enabled: encode_bool(value.permissionless_recovery_enabled),
             recovery_fallback_price_enabled: encode_bool(value.recovery_fallback_price_enabled),
@@ -1198,6 +1205,7 @@ impl V14ConfigAccount {
             max_price_move_bps_per_slot: self.max_price_move_bps_per_slot.get(),
             max_account_b_settlement_chunks: self.max_account_b_settlement_chunks.get(),
             max_bankrupt_close_chunks: self.max_bankrupt_close_chunks.get(),
+            max_bankrupt_close_lifetime_slots: self.max_bankrupt_close_lifetime_slots.get(),
             public_b_chunk_atoms: self.public_b_chunk_atoms.get(),
             permissionless_recovery_enabled: decode_bool(self.permissionless_recovery_enabled)?,
             recovery_fallback_price_enabled: decode_bool(self.recovery_fallback_price_enabled)?,
@@ -3322,11 +3330,6 @@ impl MarketGroupV14 {
             return Err(V14Error::LockActive);
         }
         let close_id = account.close_progress.close_id.saturating_add(1).max(1);
-        let close_span = self
-            .config
-            .max_accrual_dt_slots
-            .checked_mul(self.config.max_bankrupt_close_chunks)
-            .ok_or(V14Error::ArithmeticOverflow)?;
         let ledger = CloseProgressLedgerV14 {
             active: true,
             finalized: false,
@@ -3337,7 +3340,7 @@ impl MarketGroupV14 {
             drift_reference_slot: self.current_slot,
             max_close_slot: self
                 .current_slot
-                .checked_add(close_span)
+                .checked_add(self.config.max_bankrupt_close_lifetime_slots)
                 .ok_or(V14Error::ArithmeticOverflow)?,
             residual_remaining: gross_loss,
             ..CloseProgressLedgerV14::EMPTY

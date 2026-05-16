@@ -557,6 +557,13 @@ fn v14_public_init_requires_crankforward_recovery_and_chunk_caps() {
         MarketGroupV14::new(market, cfg),
         Err(V14Error::InvalidConfig)
     );
+
+    let mut cfg = V14Config::public_user_fund(4, 0, 10);
+    cfg.max_bankrupt_close_lifetime_slots = 0;
+    assert_eq!(
+        MarketGroupV14::new(market, cfg),
+        Err(V14Error::InvalidConfig)
+    );
 }
 
 #[test]
@@ -2603,6 +2610,51 @@ fn v14_expired_close_progress_routes_recovery_before_b_booking() {
     assert_eq!(
         g.pending_domain_loss_barrier_count(0, SideV14::Short),
         Ok(0)
+    );
+}
+
+#[test]
+fn v14_close_progress_uses_configured_lifetime_and_does_not_refresh_on_continuation() {
+    let (market, _, owner) = ids();
+    let mut cfg = V14Config::public_user_fund(1, 0, 10);
+    cfg.max_bankrupt_close_chunks = 7;
+    cfg.max_bankrupt_close_lifetime_slots = 5;
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV14::new(market, cfg).unwrap();
+    g.current_slot = 11;
+    let mut bankrupt = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], owner));
+    let mut participant =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    g.attach_leg(&mut participant, 0, SideV14::Short, -10)
+        .unwrap();
+
+    let first = g
+        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2)
+        .unwrap();
+    assert_eq!(first.booked_loss, 1);
+    let first_ledger = bankrupt.close_progress;
+    assert!(first_ledger.active);
+    assert!(!first_ledger.finalized);
+    assert_eq!(first_ledger.drift_reference_slot, 11);
+    assert_eq!(first_ledger.max_close_slot, 16);
+    assert_ne!(
+        first_ledger.max_close_slot,
+        11 + cfg.max_accrual_dt_slots * cfg.max_bankrupt_close_chunks
+    );
+
+    g.current_slot = 12;
+    let second = g
+        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2)
+        .unwrap();
+    assert_eq!(second.booked_loss, 1);
+    assert!(bankrupt.close_progress.finalized);
+    assert_eq!(
+        bankrupt.close_progress.drift_reference_slot,
+        first_ledger.drift_reference_slot
+    );
+    assert_eq!(
+        bankrupt.close_progress.max_close_slot,
+        first_ledger.max_close_slot
     );
 }
 
