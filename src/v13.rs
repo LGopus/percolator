@@ -1389,12 +1389,14 @@ pub struct PortfolioAccountV13Account {
 }
 
 impl PortfolioAccountV13Account {
+    #[cfg(not(target_os = "solana"))]
     pub fn try_empty(header: ProvenanceHeaderV13Account) -> V13Result<Self> {
         Ok(Self::from_runtime(&PortfolioAccountV13::empty(
             header.try_to_runtime()?,
         )))
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn from_runtime(value: &PortfolioAccountV13) -> Self {
         let mut legs = [PortfolioLegV13Account::default(); V13_MAX_PORTFOLIO_ASSETS_N];
         let mut i = 0;
@@ -1420,6 +1422,7 @@ impl PortfolioAccountV13Account {
         }
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn try_to_runtime(&self) -> V13Result<PortfolioAccountV13> {
         let mut legs = [PortfolioLegV13::EMPTY; V13_MAX_PORTFOLIO_ASSETS_N];
         let mut i = 0;
@@ -1454,6 +1457,7 @@ impl PortfolioAccountV13Account {
         Ok(out)
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn validate_with_market(&self, market: &MarketGroupV13) -> V13Result<PortfolioAccountV13> {
         let out = self.try_to_runtime()?;
         market.validate_account_shape(&out)?;
@@ -1494,6 +1498,7 @@ pub struct MarketGroupV13Account {
 }
 
 impl MarketGroupV13Account {
+    #[cfg(not(target_os = "solana"))]
     pub fn from_runtime(value: &MarketGroupV13) -> Self {
         let mut assets = [AssetStateV13Account::default(); V13_MAX_PORTFOLIO_ASSETS_N];
         let mut i = 0;
@@ -1532,6 +1537,7 @@ impl MarketGroupV13Account {
         }
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn try_to_runtime(&self) -> V13Result<MarketGroupV13> {
         let mut assets = [AssetStateV13::default(); V13_MAX_PORTFOLIO_ASSETS_N];
         let mut i = 0;
@@ -1572,6 +1578,7 @@ impl MarketGroupV13Account {
         Ok(out)
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn validate(&self) -> V13Result<MarketGroupV13> {
         self.try_to_runtime()
     }
