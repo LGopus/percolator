@@ -3595,6 +3595,51 @@ fn proof_v14_hlock_allows_risk_increasing_trade_with_principal_margin() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
+fn proof_v14_loss_stale_blocks_risk_increasing_trade_before_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    group.deposit_not_atomic(&mut long, 100).unwrap();
+    group.deposit_not_atomic(&mut short, 100).unwrap();
+    group.loss_stale_active = true;
+
+    let before_vault = group.vault;
+    let before_c_tot = group.c_tot;
+    let before_insurance = group.insurance;
+    let before_long_capital = long.capital;
+    let before_short_capital = short.capital;
+    let result = group.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV14 {
+            asset_index: 0,
+            size_q: 1,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        result == Err(V14Error::LockActive),
+        "v14 loss-stale risk-increasing trade rejection reachable"
+    );
+    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(group.vault, before_vault);
+    assert_eq!(group.c_tot, before_c_tot);
+    assert_eq!(group.insurance, before_insurance);
+    assert_eq!(long.capital, before_long_capital);
+    assert_eq!(short.capital, before_short_capital);
+    assert_eq!(long.active_bitmap, 0);
+    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
 fn proof_v14_hlock_risk_increasing_trade_rejects_positive_credit_dependency_without_mutation() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();

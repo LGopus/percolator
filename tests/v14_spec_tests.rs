@@ -2437,6 +2437,33 @@ fn v14_hlock_allows_risk_increasing_trade_with_no_positive_credit_margin() {
 }
 
 #[test]
+fn v14_loss_stale_blocks_risk_increasing_trade_even_with_no_positive_credit_margin() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+    g.deposit_not_atomic(&mut long, 10_000).unwrap();
+    g.deposit_not_atomic(&mut short, 10_000).unwrap();
+    g.loss_stale_active = true;
+
+    let before = (g, long, short);
+    let res = g.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV14 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V14Error::LockActive));
+    assert_eq!((g, long, short), before);
+}
+
+#[test]
 fn v14_hlock_rejects_risk_increasing_trade_that_needs_positive_pnl_credit() {
     let mut g = group();
     let mut long = account();

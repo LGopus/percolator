@@ -10,18 +10,18 @@ Static inventory from the current `v14` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 152 |
-| Kani proofs | 147 |
-| Kani cover checks | 232 |
+| Rust spec/fuzz tests | 153 |
+| Kani proofs | 148 |
+| Kani cover checks | 233 |
 | Kani assumptions | 125 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v14_spec_tests.rs` | 151 | 0 | 0 |
+| `tests/v14_spec_tests.rs` | 152 | 0 | 0 |
 | `tests/v14_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v14.rs` | 0 | 140 | 224 |
+| `tests/proofs_v14.rs` | 0 | 141 | 225 |
 | `tests/proofs_v14_arithmetic.rs` | 0 | 7 | 8 |
 
 The v14 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 147 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 148 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -149,6 +149,7 @@ All per-harness timings are recorded in `kani_audit_final.tsv`.
 | `proof_v14_pending_domain_barrier_blocks_rebalance_weight_escape_before_mutation` | 40.3s | PASS |
 | `proof_v14_hlock_allows_risk_increasing_trade_with_principal_margin` | 113.4s | PASS |
 | `proof_v14_hlock_risk_increasing_trade_rejects_positive_credit_dependency_without_mutation` | 101.2s | PASS |
+| `proof_v14_loss_stale_blocks_risk_increasing_trade_before_mutation` | 18.6s | PASS |
 
 ## Spec Section 16 Traceability
 
@@ -184,7 +185,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `insurance_boundary_non_deficit_paths` | `proof_v14_non_deficit_public_paths_do_not_decrease_insurance`; bankrupt liquidation insurance-spend proofs |
 | `account_free_equity_active_accrual_requires_protective_progress` | `v14_account_free_equity_active_accrual_requires_protective_progress`; `v14_permissionless_crank_flat_refresh_is_not_protective_for_equity_active_accrual`; `v14_permissionless_crank_cross_asset_liquidation_is_not_protective_for_accrued_asset`; `proof_v14_equity_active_accrual_requires_protective_progress`; `proof_v14_permissionless_flat_refresh_is_not_protective_for_equity_active_accrual`; `proof_v14_permissionless_cross_asset_liquidation_is_not_protective_for_equity_active_accrual` |
 | `effective_price_raw_target_lag_no_free_option` | target/effective lag trade, withdraw, and conversion tests; `proof_v14_target_effective_lag_rejects_risk_increasing_trade_before_mutation`; `proof_v14_target_effective_lag_blocks_pnl_conversion_before_mutation`; `proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation` |
-| `loss_stale_catchup_blocks_risk_increase_until_current` | `v14_loss_stale_blocks_nonflat_withdrawal_even_if_no_positive_credit_suffices`; `v14_loss_stale_allows_pure_risk_reducing_trade_path`; `proof_v14_loss_stale_blocks_nonflat_withdrawal` |
+| `loss_stale_catchup_blocks_risk_increase_until_current` | `v14_loss_stale_blocks_nonflat_withdrawal_even_if_no_positive_credit_suffices`; `v14_loss_stale_blocks_risk_increasing_trade_even_with_no_positive_credit_margin`; `v14_loss_stale_allows_pure_risk_reducing_trade_path`; `proof_v14_loss_stale_blocks_nonflat_withdrawal`; `proof_v14_loss_stale_blocks_risk_increasing_trade_before_mutation` |
 | `domain_locks_do_not_freeze_asset_accrual` | `v14_active_bankrupt_close_does_not_freeze_asset_accrual`; `proof_v14_active_bankrupt_close_does_not_freeze_asset_accrual` |
 | `close_id_reused_across_preemption_restart_until_finalized` / `new_close_id_for_unfinalized_account_reverts` | `v14_new_close_cannot_overwrite_active_finalized_close_ledger`; `proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger` |
 | `drift_reference_slot_immutable_across_preemption_restart` / `max_close_slot_immutable_across_recompute` / `repeated_preemption_cannot_extend_close_lifetime` | `v14_close_progress_uses_configured_lifetime_and_does_not_refresh_on_continuation`; `proof_v14_close_lifetime_uses_configured_bound_and_is_not_refreshed`; stale/expired close recovery tests/proofs |
@@ -255,9 +256,9 @@ Strength indicators:
 
 | Check | Result |
 |---|---:|
-| Harnesses over v14 production transitions | 126 |
+| Harnesses over v14 production transitions | 127 |
 | Harnesses over shared production arithmetic helpers | 7 |
-| Harnesses with `kani::cover!` reachability checks | 127 |
+| Harnesses with `kani::cover!` reachability checks | 128 |
 | Explicit `kani::assume(false)` / `assume(false)` findings | 0 |
 | Confirmed vacuous harnesses | 0 |
 | Confirmed weak harnesses | 0 |
@@ -266,10 +267,10 @@ Current classification:
 
 | Classification | Status |
 |---|---|
-| Non-vacuity | No confirmed vacuous harnesses found. Cover checks exercise h-min/h-max, stale set/clear, stale/B-stale deposit lock preservation, hidden-leg rejection, persisted provenance/bitmap smuggling rejection, persisted recovery fallback bool rejection, B-chunk progress paths, B-stale trade rollback, malformed fee-credit states, invalid config branches including disabled recovery fallback policy and zero close lifetime, OI/loss-weight shape mismatch branches, aggregate deposit branches, arithmetic floor/ceil branches, positive/negative K-diff branches, bankrupt residual recovery, zero/partial insurance paths, non-deficit insurance-boundary public paths, favorable-action lock composition, active-close accrual, close-id overwrite rejection, configured close-lifetime anchoring and continuation immutability, malformed quantity-ADL ledgers, close-progress domain mismatch rejection, stale open-close snapshot recovery before B/ADL mutation, pending-domain barrier trade/rebalance escape attempts, same-asset protective-progress gating for permissionless crank accrual, terminal recovery mode and dead-leg forfeit enablement, terminal recovery reason/mode immutability, terminal recovery value-escape, crank-mutation, liquidation, and rebalance rejection, permissionless partial-B refresh, released-PnL zero/positive conversion paths, resolved partial-B close progress, partial-liquidation recovery, and rebalance reduction paths. |
+| Non-vacuity | No confirmed vacuous harnesses found. Cover checks exercise h-min/h-max, stale set/clear, stale/B-stale deposit lock preservation, hidden-leg rejection, persisted provenance/bitmap smuggling rejection, persisted recovery fallback bool rejection, B-chunk progress paths, B-stale trade rollback, malformed fee-credit states, invalid config branches including disabled recovery fallback policy and zero close lifetime, OI/loss-weight shape mismatch branches, aggregate deposit branches, arithmetic floor/ceil branches, positive/negative K-diff branches, bankrupt residual recovery, zero/partial insurance paths, non-deficit insurance-boundary public paths, favorable-action lock composition, active-close accrual, close-id overwrite rejection, configured close-lifetime anchoring and continuation immutability, malformed quantity-ADL ledgers, close-progress domain mismatch rejection, stale open-close snapshot recovery before B/ADL mutation, pending-domain barrier trade/rebalance escape attempts, same-asset protective-progress gating for permissionless crank accrual, terminal recovery mode and dead-leg forfeit enablement, terminal recovery reason/mode immutability, terminal recovery value-escape, crank-mutation, liquidation, and rebalance rejection, permissionless partial-B refresh, released-PnL zero/positive conversion paths, loss-stale risk-increase rejection, resolved partial-B close progress, partial-liquidation recovery, and rebalance reduction paths. |
 | Weak proofs | No confirmed weak proofs in the v14 inventory. Concrete-branch harnesses are intentional regression proofs over production methods, and symbolic arithmetic/transition harnesses cover the remaining branch families. |
 | Inductive strength | The stale-counter and arithmetic helper proofs are closest to local inductive transition proofs. The overall suite is a strong production-code safety/liveness harness set, not a complete arbitrary-state inductive proof of the whole engine. |
-| Practical proof boundary | The suite proves key v14 account-local invariants over real production methods: h-lock selection, provenance/hidden-leg fail-closed behavior, persisted wire provenance/bitmap fail-closed behavior, public recovery fallback config fail-closed behavior, stale counter idempotence and refresh clearing, stale/B-stale deposit lock preservation, malformed signed state rejection, OI/loss-weight canonicality, deposit/withdraw accounting, aggregate senior accounting, close-account local-state gating, risk-notional monotonicity, position-bound fail-before-mutation, B-chunk progress/fail-closed behavior, close-id immutability against active-ledger overwrite, configured close lifetime and immutable close drift anchors across continuation, quantity-ADL close-progress shape, close-progress residual-domain shape, stale open-close snapshot recovery before B/ADL mutation, B-stale trade preflight rollback through the public staged API, pending-domain-loss barrier trade/rebalance escape rejection, bounded repeated B-chunk completion for small residuals, multi-asset full-refresh settlement/scoring, non-deficit public-path insurance preservation, full-refresh gating, favorable-action lock fail-before-mutation behavior, monotonic liquidation-score rejection, loss-before-fee ordering, account-free equity-active accrual protective-progress gating, terminal recovery declaration and immutability, dead-leg forfeit value preservation, terminal recovery value-escape blocking, terminal recovery crank/liquidation/rebalance mutation blocking, active-bankrupt-close accrual liveness, one-segment bounded catchup, funding-rate cap fail-before-mutation, dynamic trade-fee enforcement, trade conservation/OI symmetry, target/effective lag risk-increase rejection, h-lock risk-increase no-positive-credit acceptance/rejection, h-lock risk-reducing liveness under no-positive-credit margin, h-lock withdrawal no-positive-credit gating, released-PnL conversion bounded by residual, loss-stale nonflat withdrawal blocking, bankrupt liquidation insurance-before-social-loss ordering, bankrupt residual durability before exposure release, partial-liquidation residual recovery before socialization, uncollectible liquidation-fee exclusion from residual loss, resolved close liveness and payout shape, durable B residual booking, prior-epoch reset clearing, quantity-ADL OI symmetry, rebalance strict risk-progress, price/funding settlement, invalid trade rollback, partial liquidation, and shared wide arithmetic semantics. |
+| Practical proof boundary | The suite proves key v14 account-local invariants over real production methods: h-lock selection, provenance/hidden-leg fail-closed behavior, persisted wire provenance/bitmap fail-closed behavior, public recovery fallback config fail-closed behavior, stale counter idempotence and refresh clearing, stale/B-stale deposit lock preservation, malformed signed state rejection, OI/loss-weight canonicality, deposit/withdraw accounting, aggregate senior accounting, close-account local-state gating, risk-notional monotonicity, position-bound fail-before-mutation, B-chunk progress/fail-closed behavior, close-id immutability against active-ledger overwrite, configured close lifetime and immutable close drift anchors across continuation, quantity-ADL close-progress shape, close-progress residual-domain shape, stale open-close snapshot recovery before B/ADL mutation, B-stale trade preflight rollback through the public staged API, pending-domain-loss barrier trade/rebalance escape rejection, bounded repeated B-chunk completion for small residuals, multi-asset full-refresh settlement/scoring, non-deficit public-path insurance preservation, full-refresh gating, favorable-action lock fail-before-mutation behavior, monotonic liquidation-score rejection, loss-before-fee ordering, account-free equity-active accrual protective-progress gating, terminal recovery declaration and immutability, dead-leg forfeit value preservation, terminal recovery value-escape blocking, terminal recovery crank/liquidation/rebalance mutation blocking, active-bankrupt-close accrual liveness, one-segment bounded catchup, funding-rate cap fail-before-mutation, dynamic trade-fee enforcement, trade conservation/OI symmetry, target/effective lag risk-increase rejection, h-lock risk-increase no-positive-credit acceptance/rejection, h-lock risk-reducing liveness under no-positive-credit margin, h-lock withdrawal no-positive-credit gating, released-PnL conversion bounded by residual, loss-stale nonflat withdrawal and risk-increasing trade blocking, bankrupt liquidation insurance-before-social-loss ordering, bankrupt residual durability before exposure release, partial-liquidation residual recovery before socialization, uncollectible liquidation-fee exclusion from residual loss, resolved close liveness and payout shape, durable B residual booking, prior-epoch reset clearing, quantity-ADL OI symmetry, rebalance strict risk-progress, price/funding settlement, invalid trade rollback, partial liquidation, and shared wide arithmetic semantics. |
 
 ## Rust Test Matrix
 
@@ -288,5 +289,5 @@ property families have been reviewed and either ported to v14 production-code
 tests/proofs or retired as slab/wrapper/v12-queue-specific.
 
 The only open audit-maintenance item is to rerun `scripts/run_kani_full_audit.sh`
-against the current 147-proof inventory and replace the older 57-proof timing
+against the current 148-proof inventory and replace the older 57-proof timing
 artifacts.
