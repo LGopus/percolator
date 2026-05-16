@@ -279,6 +279,17 @@ fn proof_v14_persisted_wire_rejects_noncanonical_bool_enum_and_option() {
     kani::cover!(bad_bool == 2, "v14 persisted invalid bool branch reachable");
     assert_eq!(account_wire.try_to_runtime(), Err(V14Error::InvalidConfig));
 
+    let mut config_bool_wire = MarketGroupV14Account::from_runtime(&group);
+    config_bool_wire.config.recovery_fallback_price_enabled = bad_bool;
+    kani::cover!(
+        bad_bool == 3,
+        "v14 persisted invalid config bool branch reachable"
+    );
+    assert_eq!(
+        config_bool_wire.try_to_runtime(),
+        Err(V14Error::InvalidConfig)
+    );
+
     let mut market_mode_wire = MarketGroupV14Account::from_runtime(&group);
     market_mode_wire.mode = bad_market_mode;
     kani::cover!(
@@ -648,7 +659,7 @@ fn proof_v14_authoritatively_flat_account_never_receives_b_loss() {
 #[kani::solver(cadical)]
 fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
     let case: u8 = kani::any();
-    kani::assume(case < 11);
+    kani::assume(case < 12);
     let (market, _, _) = symbolic_ids();
     let mut cfg = V14Config::public_user_fund(1, 0, 1);
     match case {
@@ -657,11 +668,12 @@ fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
         2 => cfg.h_min = 2,
         3 => cfg.min_nonzero_mm_req = cfg.min_nonzero_im_req,
         4 => cfg.permissionless_recovery_enabled = false,
-        5 => cfg.public_b_chunk_atoms = 0,
-        6 => cfg.stale_certificate_penalty_enabled = false,
-        7 => cfg.full_refresh_required_for_favorable_actions = false,
-        8 => cfg.public_liveness_profile_crank_forward = false,
-        9 => cfg.max_account_b_settlement_chunks = 0,
+        5 => cfg.recovery_fallback_price_enabled = false,
+        6 => cfg.public_b_chunk_atoms = 0,
+        7 => cfg.stale_certificate_penalty_enabled = false,
+        8 => cfg.full_refresh_required_for_favorable_actions = false,
+        9 => cfg.public_liveness_profile_crank_forward = false,
+        10 => cfg.max_account_b_settlement_chunks = 0,
         _ => cfg.max_bankrupt_close_chunks = 0,
     }
 
@@ -670,12 +682,13 @@ fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
     kani::cover!(case == 2, "v14 hmin above hmax rejected");
     kani::cover!(case == 3, "v14 invalid margin floor ordering rejected");
     kani::cover!(case == 4, "v14 disabled recovery rejected");
-    kani::cover!(case == 5, "v14 zero B chunk budget rejected");
-    kani::cover!(case == 6, "v14 disabled stale certificate penalty rejected");
-    kani::cover!(case == 7, "v14 disabled required full refresh rejected");
-    kani::cover!(case == 8, "v14 disabled crank-forward profile rejected");
-    kani::cover!(case == 9, "v14 zero account B chunk cap rejected");
-    kani::cover!(case == 10, "v14 zero bankrupt close chunk cap rejected");
+    kani::cover!(case == 5, "v14 disabled recovery fallback rejected");
+    kani::cover!(case == 6, "v14 zero B chunk budget rejected");
+    kani::cover!(case == 7, "v14 disabled stale certificate penalty rejected");
+    kani::cover!(case == 8, "v14 disabled required full refresh rejected");
+    kani::cover!(case == 9, "v14 disabled crank-forward profile rejected");
+    kani::cover!(case == 10, "v14 zero account B chunk cap rejected");
+    kani::cover!(case == 11, "v14 zero bankrupt close chunk cap rejected");
     assert_eq!(
         MarketGroupV14::new(market, cfg),
         Err(V14Error::InvalidConfig)

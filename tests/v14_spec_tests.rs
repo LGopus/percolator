@@ -144,6 +144,13 @@ fn v14_persisted_account_wire_rejects_invalid_bool_enum_and_option_encoding() {
         Err(V14Error::InvalidConfig)
     );
 
+    let mut bad_config_bool = MarketGroupV14Account::from_runtime(&g);
+    bad_config_bool.config.recovery_fallback_price_enabled = 2;
+    assert_eq!(
+        bad_config_bool.try_to_runtime(),
+        Err(V14Error::InvalidConfig)
+    );
+
     let mut bad_side_mode = MarketGroupV14Account::from_runtime(&g);
     bad_side_mode.assets[0].mode_long = 9;
     assert_eq!(bad_side_mode.try_to_runtime(), Err(V14Error::InvalidConfig));
@@ -493,6 +500,18 @@ fn v14_public_init_rejects_disabled_recovery_profile() {
     let (market, _, _) = ids();
     let mut cfg = V14Config::public_user_fund(4, 0, 10);
     cfg.permissionless_recovery_enabled = false;
+
+    assert_eq!(
+        MarketGroupV14::new(market, cfg),
+        Err(V14Error::InvalidConfig)
+    );
+}
+
+#[test]
+fn v14_public_init_rejects_disabled_recovery_fallback_price_policy() {
+    let (market, _, _) = ids();
+    let mut cfg = V14Config::public_user_fund(4, 0, 10);
+    cfg.recovery_fallback_price_enabled = false;
 
     assert_eq!(
         MarketGroupV14::new(market, cfg),

@@ -124,6 +124,7 @@ pub struct V14Config {
     pub max_bankrupt_close_chunks: u64,
     pub public_b_chunk_atoms: u128,
     pub permissionless_recovery_enabled: bool,
+    pub recovery_fallback_price_enabled: bool,
     pub stale_certificate_penalty_enabled: bool,
     pub full_refresh_required_for_favorable_actions: bool,
     pub public_liveness_profile_crank_forward: bool,
@@ -151,6 +152,7 @@ impl V14Config {
             max_bankrupt_close_chunks: 1,
             public_b_chunk_atoms: MAX_VAULT_TVL,
             permissionless_recovery_enabled: true,
+            recovery_fallback_price_enabled: true,
             stale_certificate_penalty_enabled: true,
             full_refresh_required_for_favorable_actions: true,
             public_liveness_profile_crank_forward: true,
@@ -546,6 +548,7 @@ impl V14Config {
             return Err(V14Error::InvalidConfig);
         }
         if !self.permissionless_recovery_enabled
+            || !self.recovery_fallback_price_enabled
             || !self.stale_certificate_penalty_enabled
             || !self.full_refresh_required_for_favorable_actions
             || !self.public_liveness_profile_crank_forward
@@ -1137,6 +1140,7 @@ pub struct V14ConfigAccount {
     pub max_bankrupt_close_chunks: V14PodU64,
     pub public_b_chunk_atoms: V14PodU128,
     pub permissionless_recovery_enabled: u8,
+    pub recovery_fallback_price_enabled: u8,
     pub stale_certificate_penalty_enabled: u8,
     pub full_refresh_required_for_favorable_actions: u8,
     pub public_liveness_profile_crank_forward: u8,
@@ -1164,6 +1168,7 @@ impl V14ConfigAccount {
             max_bankrupt_close_chunks: V14PodU64::new(value.max_bankrupt_close_chunks),
             public_b_chunk_atoms: V14PodU128::new(value.public_b_chunk_atoms),
             permissionless_recovery_enabled: encode_bool(value.permissionless_recovery_enabled),
+            recovery_fallback_price_enabled: encode_bool(value.recovery_fallback_price_enabled),
             stale_certificate_penalty_enabled: encode_bool(value.stale_certificate_penalty_enabled),
             full_refresh_required_for_favorable_actions: encode_bool(
                 value.full_refresh_required_for_favorable_actions,
@@ -1195,6 +1200,7 @@ impl V14ConfigAccount {
             max_bankrupt_close_chunks: self.max_bankrupt_close_chunks.get(),
             public_b_chunk_atoms: self.public_b_chunk_atoms.get(),
             permissionless_recovery_enabled: decode_bool(self.permissionless_recovery_enabled)?,
+            recovery_fallback_price_enabled: decode_bool(self.recovery_fallback_price_enabled)?,
             stale_certificate_penalty_enabled: decode_bool(self.stale_certificate_penalty_enabled)?,
             full_refresh_required_for_favorable_actions: decode_bool(
                 self.full_refresh_required_for_favorable_actions,
