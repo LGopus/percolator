@@ -58,6 +58,16 @@ pub enum SideModeV15 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetLifecycleV15 {
+    Disabled,
+    PendingActivation,
+    Active,
+    DrainOnly,
+    Retired,
+    Recovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarketModeV15 {
     Live,
     Resolved,
@@ -123,6 +133,7 @@ pub struct V15Config {
     pub max_account_b_settlement_chunks: u64,
     pub max_bankrupt_close_chunks: u64,
     pub max_bankrupt_close_lifetime_slots: u64,
+    pub asset_activation_cooldown_slots: u64,
     pub public_b_chunk_atoms: u128,
     pub permissionless_recovery_enabled: bool,
     pub recovery_fallback_price_enabled: bool,
@@ -152,6 +163,7 @@ impl V15Config {
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 1,
+            asset_activation_cooldown_slots: 1,
             public_b_chunk_atoms: MAX_VAULT_TVL,
             permissionless_recovery_enabled: true,
             recovery_fallback_price_enabled: true,
@@ -546,6 +558,7 @@ impl V15Config {
             || self.max_account_b_settlement_chunks == 0
             || self.max_bankrupt_close_chunks == 0
             || self.max_bankrupt_close_lifetime_slots == 0
+            || self.asset_activation_cooldown_slots == 0
             || self.public_b_chunk_atoms == 0
         {
             return Err(V15Error::InvalidConfig);
@@ -565,6 +578,7 @@ impl V15Config {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetStateV15 {
+    pub lifecycle: AssetLifecycleV15,
     pub raw_oracle_target_price: u64,
     pub effective_price: u64,
     pub fund_px_last: u64,
@@ -606,6 +620,7 @@ pub struct AssetStateV15 {
 impl Default for AssetStateV15 {
     fn default() -> Self {
         Self {
+            lifecycle: AssetLifecycleV15::Active,
             raw_oracle_target_price: 1,
             effective_price: 1,
             fund_px_last: 1,
@@ -890,6 +905,9 @@ pub struct MarketGroupV15 {
     pub b_stale_account_count: u64,
     pub negative_pnl_account_count: u64,
     pub risk_epoch: u64,
+    pub asset_set_epoch: u64,
+    pub asset_activation_count: u64,
+    pub last_asset_activation_slot: u64,
     pub oracle_epoch: u64,
     pub funding_epoch: u64,
     pub slot_last: u64,
@@ -1205,6 +1223,7 @@ pub struct V15ConfigAccount {
     pub max_account_b_settlement_chunks: V15PodU64,
     pub max_bankrupt_close_chunks: V15PodU64,
     pub max_bankrupt_close_lifetime_slots: V15PodU64,
+    pub asset_activation_cooldown_slots: V15PodU64,
     pub public_b_chunk_atoms: V15PodU128,
     pub permissionless_recovery_enabled: u8,
     pub recovery_fallback_price_enabled: u8,
@@ -1236,6 +1255,7 @@ impl V15ConfigAccount {
             max_bankrupt_close_lifetime_slots: V15PodU64::new(
                 value.max_bankrupt_close_lifetime_slots,
             ),
+            asset_activation_cooldown_slots: V15PodU64::new(value.asset_activation_cooldown_slots),
             public_b_chunk_atoms: V15PodU128::new(value.public_b_chunk_atoms),
             permissionless_recovery_enabled: encode_bool(value.permissionless_recovery_enabled),
             recovery_fallback_price_enabled: encode_bool(value.recovery_fallback_price_enabled),
@@ -1269,6 +1289,7 @@ impl V15ConfigAccount {
             max_account_b_settlement_chunks: self.max_account_b_settlement_chunks.get(),
             max_bankrupt_close_chunks: self.max_bankrupt_close_chunks.get(),
             max_bankrupt_close_lifetime_slots: self.max_bankrupt_close_lifetime_slots.get(),
+            asset_activation_cooldown_slots: self.asset_activation_cooldown_slots.get(),
             public_b_chunk_atoms: self.public_b_chunk_atoms.get(),
             permissionless_recovery_enabled: decode_bool(self.permissionless_recovery_enabled)?,
             recovery_fallback_price_enabled: decode_bool(self.recovery_fallback_price_enabled)?,
@@ -1288,6 +1309,7 @@ impl V15ConfigAccount {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct AssetStateV15Account {
+    pub lifecycle: u8,
     pub raw_oracle_target_price: V15PodU64,
     pub effective_price: V15PodU64,
     pub fund_px_last: V15PodU64,
@@ -1329,6 +1351,7 @@ pub struct AssetStateV15Account {
 impl AssetStateV15Account {
     pub fn from_runtime(value: &AssetStateV15) -> Self {
         Self {
+            lifecycle: encode_asset_lifecycle(value.lifecycle),
             raw_oracle_target_price: V15PodU64::new(value.raw_oracle_target_price),
             effective_price: V15PodU64::new(value.effective_price),
             fund_px_last: V15PodU64::new(value.fund_px_last),
@@ -1370,6 +1393,7 @@ impl AssetStateV15Account {
 
     pub fn try_to_runtime(&self) -> V15Result<AssetStateV15> {
         let out = AssetStateV15 {
+            lifecycle: decode_asset_lifecycle(self.lifecycle)?,
             raw_oracle_target_price: self.raw_oracle_target_price.get(),
             effective_price: self.effective_price.get(),
             fund_px_last: self.fund_px_last.get(),
@@ -1799,6 +1823,9 @@ pub struct MarketGroupV15Account {
     pub b_stale_account_count: V15PodU64,
     pub negative_pnl_account_count: V15PodU64,
     pub risk_epoch: V15PodU64,
+    pub asset_set_epoch: V15PodU64,
+    pub asset_activation_count: V15PodU64,
+    pub last_asset_activation_slot: V15PodU64,
     pub oracle_epoch: V15PodU64,
     pub funding_epoch: V15PodU64,
     pub slot_last: V15PodU64,
@@ -1853,6 +1880,9 @@ impl MarketGroupV15Account {
             b_stale_account_count: V15PodU64::new(value.b_stale_account_count),
             negative_pnl_account_count: V15PodU64::new(value.negative_pnl_account_count),
             risk_epoch: V15PodU64::new(value.risk_epoch),
+            asset_set_epoch: V15PodU64::new(value.asset_set_epoch),
+            asset_activation_count: V15PodU64::new(value.asset_activation_count),
+            last_asset_activation_slot: V15PodU64::new(value.last_asset_activation_slot),
             oracle_epoch: V15PodU64::new(value.oracle_epoch),
             funding_epoch: V15PodU64::new(value.funding_epoch),
             slot_last: V15PodU64::new(value.slot_last),
@@ -1909,6 +1939,9 @@ impl MarketGroupV15Account {
             b_stale_account_count: self.b_stale_account_count.get(),
             negative_pnl_account_count: self.negative_pnl_account_count.get(),
             risk_epoch: self.risk_epoch.get(),
+            asset_set_epoch: self.asset_set_epoch.get(),
+            asset_activation_count: self.asset_activation_count.get(),
+            last_asset_activation_slot: self.last_asset_activation_slot.get(),
             oracle_epoch: self.oracle_epoch.get(),
             funding_epoch: self.funding_epoch.get(),
             slot_last: self.slot_last.get(),
@@ -1957,6 +1990,9 @@ impl MarketGroupV15 {
             b_stale_account_count: 0,
             negative_pnl_account_count: 0,
             risk_epoch: 0,
+            asset_set_epoch: 0,
+            asset_activation_count: 0,
+            last_asset_activation_slot: 0,
             oracle_epoch: 0,
             funding_epoch: 0,
             slot_last: 0,
@@ -2405,6 +2441,85 @@ impl MarketGroupV15 {
         Ok(())
     }
 
+    pub fn mark_asset_drain_only_not_atomic(&mut self, asset_index: usize) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if self.mode != MarketModeV15::Live {
+            return Err(V15Error::LockActive);
+        }
+        match self.assets[asset_index].lifecycle {
+            AssetLifecycleV15::Active => {
+                self.assets[asset_index].lifecycle = AssetLifecycleV15::DrainOnly;
+                self.bump_asset_set_epoch()?;
+                self.assert_public_invariants()
+            }
+            AssetLifecycleV15::DrainOnly => Ok(()),
+            _ => Err(V15Error::LockActive),
+        }
+    }
+
+    pub fn retire_empty_asset_not_atomic(&mut self, asset_index: usize) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        match self.assets[asset_index].lifecycle {
+            AssetLifecycleV15::Active
+            | AssetLifecycleV15::DrainOnly
+            | AssetLifecycleV15::Recovery => {
+                self.require_empty_asset_lifecycle_state(asset_index)?;
+                self.assets[asset_index].lifecycle = AssetLifecycleV15::Retired;
+                self.bump_asset_set_epoch()?;
+                self.assert_public_invariants()
+            }
+            AssetLifecycleV15::Retired => Ok(()),
+            _ => Err(V15Error::LockActive),
+        }
+    }
+
+    pub fn activate_empty_asset_not_atomic(
+        &mut self,
+        asset_index: usize,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if self.mode != MarketModeV15::Live {
+            return Err(V15Error::LockActive);
+        }
+        if authenticated_price == 0
+            || authenticated_price > MAX_ORACLE_PRICE
+            || now_slot < self.current_slot
+        {
+            return Err(V15Error::InvalidConfig);
+        }
+        if self.asset_activation_count != 0 {
+            let elapsed = now_slot
+                .checked_sub(self.last_asset_activation_slot)
+                .ok_or(V15Error::Stale)?;
+            if elapsed < self.config.asset_activation_cooldown_slots {
+                return Err(V15Error::LockActive);
+            }
+        }
+        match self.assets[asset_index].lifecycle {
+            AssetLifecycleV15::Disabled | AssetLifecycleV15::Retired => {}
+            _ => return Err(V15Error::LockActive),
+        }
+        self.config.validate_public_user_fund()?;
+        self.require_empty_asset_lifecycle_state(asset_index)?;
+        let mut asset = AssetStateV15::default();
+        asset.lifecycle = AssetLifecycleV15::Active;
+        asset.raw_oracle_target_price = authenticated_price;
+        asset.effective_price = authenticated_price;
+        asset.fund_px_last = authenticated_price;
+        asset.slot_last = now_slot;
+        self.assets[asset_index] = asset;
+        self.current_slot = now_slot;
+        self.asset_activation_count = self
+            .asset_activation_count
+            .checked_add(1)
+            .ok_or(V15Error::CounterOverflow)?;
+        self.last_asset_activation_slot = now_slot;
+        self.bump_asset_set_epoch()?;
+        self.assert_public_invariants()
+    }
+
     pub fn attach_leg(
         &mut self,
         account: &mut PortfolioAccountV15,
@@ -2416,6 +2531,7 @@ impl MarketGroupV15 {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V15Error::InvalidLeg);
         }
+        self.require_asset_active_for_risk_increase(asset_index)?;
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
             return Err(V15Error::LockActive);
         }
@@ -2890,6 +3006,7 @@ impl MarketGroupV15 {
         {
             return Err(V15Error::InvalidConfig);
         }
+        self.require_asset_accruable(asset_index)?;
         let dt_total = now_slot - self.assets[asset_index].slot_last;
         let segment_dt = if dt_total > self.config.max_accrual_dt_slots {
             self.config.max_accrual_dt_slots
@@ -3063,6 +3180,9 @@ impl MarketGroupV15 {
         if risk_increasing && (self.loss_stale_active || target_effective_lag) {
             return Err(V15Error::LockActive);
         }
+        if risk_increasing {
+            self.require_asset_active_for_risk_increase(request.asset_index)?;
+        }
 
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
@@ -3105,6 +3225,7 @@ impl MarketGroupV15 {
         {
             return Err(V15Error::InvalidConfig);
         }
+        self.require_asset_live_reducible(request.asset_index)?;
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
         if account.health_cert.certified_liq_deficit == 0 {
@@ -3356,6 +3477,7 @@ impl MarketGroupV15 {
         {
             return Err(V15Error::InvalidConfig);
         }
+        self.require_asset_live_reducible(request.asset_index)?;
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
         let before = *account;
@@ -4266,6 +4388,13 @@ impl MarketGroupV15 {
         if self.slot_last > self.current_slot {
             return Err(V15Error::InvalidConfig);
         }
+        if self.asset_activation_count == 0 {
+            if self.last_asset_activation_slot != 0 {
+                return Err(V15Error::InvalidConfig);
+            }
+        } else if self.last_asset_activation_slot > self.current_slot {
+            return Err(V15Error::InvalidConfig);
+        }
         let mut d = 0;
         while d < V15_DOMAIN_COUNT {
             if self.insurance_domain_spent[d] > self.insurance_domain_budget[d] {
@@ -4280,12 +4409,19 @@ impl MarketGroupV15 {
         }
         for i in 0..self.config.max_portfolio_assets as usize {
             let asset = self.assets[i];
-            if asset.effective_price == 0
-                || asset.effective_price > MAX_ORACLE_PRICE
-                || asset.raw_oracle_target_price == 0
-                || asset.raw_oracle_target_price > MAX_ORACLE_PRICE
-                || asset.fund_px_last == 0
-                || asset.fund_px_last > MAX_ORACLE_PRICE
+            let requires_price = matches!(
+                asset.lifecycle,
+                AssetLifecycleV15::Active
+                    | AssetLifecycleV15::DrainOnly
+                    | AssetLifecycleV15::Recovery
+            );
+            if (requires_price
+                && (asset.effective_price == 0
+                    || asset.effective_price > MAX_ORACLE_PRICE
+                    || asset.raw_oracle_target_price == 0
+                    || asset.raw_oracle_target_price > MAX_ORACLE_PRICE
+                    || asset.fund_px_last == 0
+                    || asset.fund_px_last > MAX_ORACLE_PRICE))
                 || asset.slot_last > self.current_slot
                 || asset.k_long == i128::MIN
                 || asset.k_short == i128::MIN
@@ -4308,6 +4444,14 @@ impl MarketGroupV15 {
                 || asset.social_loss_dust_short_num >= SOCIAL_LOSS_DEN
             {
                 return Err(V15Error::InvalidConfig);
+            }
+            if matches!(
+                asset.lifecycle,
+                AssetLifecycleV15::Disabled
+                    | AssetLifecycleV15::PendingActivation
+                    | AssetLifecycleV15::Retired
+            ) {
+                self.require_empty_asset_lifecycle_state(i)?;
             }
         }
         Ok(())
@@ -4384,9 +4528,99 @@ impl MarketGroupV15 {
         })
     }
 
+    fn validate_configured_asset_index(&self, asset_index: usize) -> V15Result<()> {
+        if asset_index >= self.config.max_portfolio_assets as usize {
+            return Err(V15Error::InvalidLeg);
+        }
+        Ok(())
+    }
+
+    fn bump_asset_set_epoch(&mut self) -> V15Result<()> {
+        self.asset_set_epoch = self
+            .asset_set_epoch
+            .checked_add(1)
+            .ok_or(V15Error::CounterOverflow)?;
+        self.risk_epoch = self
+            .risk_epoch
+            .checked_add(1)
+            .ok_or(V15Error::CounterOverflow)?;
+        Ok(())
+    }
+
+    fn require_asset_active_for_risk_increase(&self, asset_index: usize) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if self.assets[asset_index].lifecycle != AssetLifecycleV15::Active {
+            return Err(V15Error::LockActive);
+        }
+        Ok(())
+    }
+
+    fn require_asset_accruable(&self, asset_index: usize) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        match self.assets[asset_index].lifecycle {
+            AssetLifecycleV15::Active | AssetLifecycleV15::DrainOnly => Ok(()),
+            _ => Err(V15Error::LockActive),
+        }
+    }
+
+    fn require_asset_live_reducible(&self, asset_index: usize) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        match self.assets[asset_index].lifecycle {
+            AssetLifecycleV15::Active | AssetLifecycleV15::DrainOnly => Ok(()),
+            _ => Err(V15Error::LockActive),
+        }
+    }
+
+    fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V15Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let asset = self.assets[asset_index];
+        let long_domain = self.insurance_domain_index(asset_index, SideV15::Long)?;
+        let short_domain = self.insurance_domain_index(asset_index, SideV15::Short)?;
+        if self.pending_domain_loss_barriers[long_domain] != 0
+            || self.pending_domain_loss_barriers[short_domain] != 0
+            || asset.mode_long != SideModeV15::Normal
+            || asset.mode_short != SideModeV15::Normal
+            || asset.a_long != ADL_ONE
+            || asset.a_short != ADL_ONE
+            || asset.k_long != 0
+            || asset.k_short != 0
+            || asset.f_long_num != 0
+            || asset.f_short_num != 0
+            || asset.k_epoch_start_long != 0
+            || asset.k_epoch_start_short != 0
+            || asset.f_epoch_start_long_num != 0
+            || asset.f_epoch_start_short_num != 0
+            || asset.b_long_num != 0
+            || asset.b_short_num != 0
+            || asset.b_epoch_start_long_num != 0
+            || asset.b_epoch_start_short_num != 0
+            || asset.oi_eff_long_q != 0
+            || asset.oi_eff_short_q != 0
+            || asset.stored_pos_count_long != 0
+            || asset.stored_pos_count_short != 0
+            || asset.stale_account_count_long != 0
+            || asset.stale_account_count_short != 0
+            || asset.loss_weight_sum_long != 0
+            || asset.loss_weight_sum_short != 0
+            || asset.social_loss_remainder_long_num != 0
+            || asset.social_loss_remainder_short_num != 0
+            || asset.social_loss_dust_long_num != 0
+            || asset.social_loss_dust_short_num != 0
+            || asset.explicit_unallocated_loss_long != 0
+            || asset.explicit_unallocated_loss_short != 0
+            || self.insurance_domain_spent[long_domain] != 0
+            || self.insurance_domain_spent[short_domain] != 0
+        {
+            return Err(V15Error::LockActive);
+        }
+        Ok(())
+    }
+
     fn leg_is_dead_for_forfeit(&self, asset_index: usize, side: SideV15) -> V15Result<bool> {
         let side_mode = self.side_mode_for(asset_index, side)?;
+        let asset_lifecycle = self.assets[asset_index].lifecycle;
         Ok(self.mode == MarketModeV15::Recovery
+            || asset_lifecycle == AssetLifecycleV15::Recovery
             || matches!(
                 side_mode,
                 SideModeV15::DrainOnly | SideModeV15::ResetPending
@@ -5149,6 +5383,7 @@ impl MarketGroupV15 {
             return self.clear_leg(account, asset_index);
         }
         if current.signum() != new.signum() {
+            self.require_asset_active_for_risk_increase(asset_index)?;
             self.clear_leg(account, asset_index)?;
             let side = if new > 0 {
                 SideV15::Long
@@ -5158,6 +5393,9 @@ impl MarketGroupV15 {
             return self.attach_leg(account, asset_index, side, new);
         }
 
+        if new.unsigned_abs() > current.unsigned_abs() {
+            self.require_asset_active_for_risk_increase(asset_index)?;
+        }
         let old_leg = account.legs[asset_index];
         let old_abs = old_leg.basis_pos_q.unsigned_abs();
         let new_abs = new.unsigned_abs();
@@ -5536,6 +5774,29 @@ fn decode_side_mode(value: u8) -> V15Result<SideModeV15> {
         0 => Ok(SideModeV15::Normal),
         1 => Ok(SideModeV15::DrainOnly),
         2 => Ok(SideModeV15::ResetPending),
+        _ => Err(V15Error::InvalidConfig),
+    }
+}
+
+fn encode_asset_lifecycle(value: AssetLifecycleV15) -> u8 {
+    match value {
+        AssetLifecycleV15::Disabled => 0,
+        AssetLifecycleV15::PendingActivation => 1,
+        AssetLifecycleV15::Active => 2,
+        AssetLifecycleV15::DrainOnly => 3,
+        AssetLifecycleV15::Retired => 4,
+        AssetLifecycleV15::Recovery => 5,
+    }
+}
+
+fn decode_asset_lifecycle(value: u8) -> V15Result<AssetLifecycleV15> {
+    match value {
+        0 => Ok(AssetLifecycleV15::Disabled),
+        1 => Ok(AssetLifecycleV15::PendingActivation),
+        2 => Ok(AssetLifecycleV15::Active),
+        3 => Ok(AssetLifecycleV15::DrainOnly),
+        4 => Ok(AssetLifecycleV15::Retired),
+        5 => Ok(AssetLifecycleV15::Recovery),
         _ => Err(V15Error::InvalidConfig),
     }
 }

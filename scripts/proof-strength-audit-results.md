@@ -10,18 +10,18 @@ Static inventory from the current `v15` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 166 |
-| Kani proofs | 161 |
-| Kani cover checks | 252 |
-| Kani assumptions | 130 |
+| Rust spec/fuzz tests | 170 |
+| Kani proofs | 165 |
+| Kani cover checks | 258 |
+| Kani assumptions | 131 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v15_spec_tests.rs` | 165 | 0 | 0 |
+| `tests/v15_spec_tests.rs` | 169 | 0 | 0 |
 | `tests/v15_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v15.rs` | 0 | 154 | 244 |
+| `tests/proofs_v15.rs` | 0 | 158 | 250 |
 | `tests/proofs_v15_arithmetic.rs` | 0 | 7 | 8 |
 
 The v15 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v15_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 161 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 165 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -129,6 +129,10 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v15_reset_pending_epoch_start_snapshots_prevent_prior_epoch_resurrection` | 32s | PASS |
 | `proof_v15_same_asset_duplicate_leg_cannot_double_count_support` | 3.5s | PASS |
 | `proof_v15_stale_profitable_leg_cannot_withdraw_using_pre_refresh_positive_pnl` | 22.521006s | PASS |
+| `proof_v15_asset_lifecycle_blocks_attach_before_accounting_mutation` | 6.8100333s | PASS |
+| `proof_v15_asset_lifecycle_blocks_accrual_for_non_accruable_states` | 3.117619s | PASS |
+| `proof_v15_asset_activation_requires_empty_slot_and_bumps_epochs` | 6.9754386s | PASS |
+| `proof_v15_asset_activation_cooldown_fails_before_lifecycle_mutation` | 4.3727317s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -171,6 +175,11 @@ Each item below maps to production-code tests, Kani proofs, or both.
 
 | Spec §16 item | Coverage |
 |---|---|
+| `mutable_asset_activation_requires_full_envelope_proofs` | `v15_asset_retire_and_activation_require_empty_asset_state_and_invalidate_certs`; `proof_v15_asset_activation_requires_empty_slot_and_bumps_epochs`; activation calls production config/envelope validation, requires empty asset lifecycle state, and bumps risk/asset-set epochs |
+| `asset_activation_invalidates_or_scopes_certs_fail_closed_without_full_scan` | `v15_asset_retire_and_activation_require_empty_asset_state_and_invalidate_certs`; risk epoch bump makes pre-activation certificates stale without market scan |
+| `asset_cannot_activate_with_nonzero_or_unreconciled_state` | `v15_asset_retire_and_activation_require_empty_asset_state_and_invalidate_certs`; `proof_v15_asset_activation_requires_empty_slot_and_bumps_epochs` |
+| `activation_rate_limit_prevents_staleness_lock_spam` | `v15_asset_activation_cooldown_rate_limits_asset_set_churn`; `proof_v15_asset_activation_cooldown_fails_before_lifecycle_mutation` |
+| `drain_retire_recovery_exit_requires_no_oi_no_pending_barriers_no_unsettled_epochs` | `v15_asset_lifecycle_blocks_new_risk_unless_active`; `v15_asset_lifecycle_drain_only_allows_reduction_but_not_increase`; asset lifecycle public invariants reject inactive slots with open accounting; `proof_v15_asset_lifecycle_blocks_attach_before_accounting_mutation`; `proof_v15_asset_lifecycle_blocks_accrual_for_non_accruable_states` |
 | `global_cross_margin_all_legs_support_maintenance` | `v15_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; `proof_v15_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; existing full-refresh and cross-margin envelope tests/proofs |
 | `global_cross_margin_does_not_create_global_B_domain` | `v15_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; `proof_v15_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; B-domain counters and pending barriers remain unchanged while cross-leg support satisfies maintenance |
 | `unbounded_global_accounts_no_full_market_scan_required` | `v15_permissionless_crank_does_not_require_full_market_scan`; `proof_v15_permissionless_crank_does_not_require_full_market_scan` |
@@ -278,9 +287,9 @@ Strength indicators:
 
 | Check | Result |
 |---|---:|
-| Harnesses over v15 production engine/wire methods | 154 |
+| Harnesses over v15 production engine/wire methods | 158 |
 | Harnesses over shared production arithmetic helpers | 7 |
-| Harnesses with `kani::cover!` reachability checks | 131 |
+| Harnesses with `kani::cover!` reachability checks | 135 |
 | Explicit `kani::assume(false)` / `assume(false)` findings | 0 |
 | Confirmed vacuous harnesses | 0 |
 | Confirmed weak harnesses | 0 |

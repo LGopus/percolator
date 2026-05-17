@@ -1,9 +1,10 @@
 #![cfg(kani)]
 
 use percolator::v15::{
-    account_equity, risk_notional_ceil, CloseProgressLedgerV15, DeadLegForfeitOutcomeV15,
-    HLockLaneV15, LiquidationRequestV15, MarketGroupV15, MarketGroupV15Account, MarketModeV15,
-    PermissionlessCrankActionV15, PermissionlessCrankRequestV15, PermissionlessProgressOutcomeV15,
+    account_equity, risk_notional_ceil, AssetLifecycleV15, CloseProgressLedgerV15,
+    DeadLegForfeitOutcomeV15, HLockLaneV15, LiquidationRequestV15, MarketGroupV15,
+    MarketGroupV15Account, MarketModeV15, PermissionlessCrankActionV15,
+    PermissionlessCrankRequestV15, PermissionlessProgressOutcomeV15,
     PermissionlessRecoveryReasonV15, PortfolioAccountV15, PortfolioAccountV15Account,
     PortfolioLegV15, ProvenanceHeaderV15, RebalanceRequestV15, ResolvedCloseOutcomeV15,
     ResolvedPayoutLedgerV15, SideModeV15, SideV15, TradeRequestV15, V15Config, V15Error,
@@ -19,6 +20,17 @@ fn symbolic_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     let account: [u8; 32] = kani::any();
     let owner: [u8; 32] = kani::any();
     (market, account, owner)
+}
+
+fn symbolic_non_active_lifecycle() -> AssetLifecycleV15 {
+    let tag: u8 = kani::any();
+    match tag % 5 {
+        0 => AssetLifecycleV15::Disabled,
+        1 => AssetLifecycleV15::PendingActivation,
+        2 => AssetLifecycleV15::DrainOnly,
+        3 => AssetLifecycleV15::Retired,
+        _ => AssetLifecycleV15::Recovery,
+    }
 }
 
 fn tight_envelope_config() -> V15Config {
@@ -1936,6 +1948,142 @@ fn proof_v15_same_asset_duplicate_leg_cannot_double_count_support() {
         asset_before.loss_weight_sum_short
     );
     assert_eq!(account.active_bitmap.count_ones(), 1);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_asset_lifecycle_blocks_attach_before_accounting_mutation() {
+    let (market, account_id, owner) = symbolic_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let lifecycle = symbolic_non_active_lifecycle();
+    group.assets[0].lifecycle = lifecycle;
+    let before_asset = group.assets[0];
+    let before_account = account;
+
+    kani::cover!(
+        lifecycle == AssetLifecycleV15::DrainOnly,
+        "v15 drain-only attach rejection reachable"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV15::Retired,
+        "v15 retired attach rejection reachable"
+    );
+
+    let result = group.attach_leg(&mut account, 0, SideV15::Long, 1);
+
+    assert_eq!(result, Err(V15Error::LockActive));
+    assert_eq!(group.assets[0], before_asset);
+    assert_eq!(account, before_account);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_asset_lifecycle_blocks_accrual_for_non_accruable_states() {
+    let (market, _, _) = symbolic_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let lifecycle = symbolic_non_active_lifecycle();
+    kani::assume(lifecycle != AssetLifecycleV15::DrainOnly);
+    group.assets[0].lifecycle = lifecycle;
+    let before = group;
+
+    kani::cover!(
+        lifecycle == AssetLifecycleV15::Recovery,
+        "v15 recovery lifecycle accrual rejection reachable"
+    );
+
+    let result = group.accrue_asset_to_not_atomic(0, 1, 1, 0, false);
+
+    assert_eq!(result, Err(V15Error::LockActive));
+    assert_eq!(group.assets[0], before.assets[0]);
+    assert_eq!(group.current_slot, before.current_slot);
+    assert_eq!(group.slot_last, before.slot_last);
+    assert_eq!(group.oracle_epoch, before.oracle_epoch);
+    assert_eq!(group.funding_epoch, before.funding_epoch);
+    assert_eq!(group.risk_epoch, before.risk_epoch);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_asset_activation_requires_empty_slot_and_bumps_epochs() {
+    let (market, _, _) = symbolic_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let nonempty: bool = kani::any();
+    group.assets[0].lifecycle = AssetLifecycleV15::Retired;
+    if nonempty {
+        group.assets[0].oi_eff_long_q = 1;
+        group.assets[0].oi_eff_short_q = 1;
+        group.assets[0].stored_pos_count_long = 1;
+        group.assets[0].stored_pos_count_short = 1;
+        group.assets[0].loss_weight_sum_long = 1;
+        group.assets[0].loss_weight_sum_short = 1;
+    }
+    let before = group;
+
+    kani::cover!(!nonempty, "v15 empty asset activation success reachable");
+    kani::cover!(
+        nonempty,
+        "v15 nonempty asset activation rejection reachable"
+    );
+
+    let result = group.activate_empty_asset_not_atomic(0, 7, 1);
+
+    if nonempty {
+        assert_eq!(result, Err(V15Error::LockActive));
+        assert_eq!(group.assets[0], before.assets[0]);
+        assert_eq!(group.current_slot, before.current_slot);
+        assert_eq!(group.risk_epoch, before.risk_epoch);
+        assert_eq!(group.asset_set_epoch, before.asset_set_epoch);
+    } else {
+        assert_eq!(result, Ok(()));
+        assert_eq!(group.assets[0].lifecycle, AssetLifecycleV15::Active);
+        assert_eq!(group.assets[0].effective_price, 7);
+        assert_eq!(group.assets[0].raw_oracle_target_price, 7);
+        assert_eq!(group.assets[0].fund_px_last, 7);
+        assert_eq!(group.assets[0].slot_last, 1);
+        assert_eq!(group.risk_epoch, before.risk_epoch + 1);
+        assert_eq!(group.asset_set_epoch, before.asset_set_epoch + 1);
+        assert_eq!(
+            group.asset_activation_count,
+            before.asset_activation_count + 1
+        );
+        assert_eq!(group.last_asset_activation_slot, 1);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_asset_activation_cooldown_fails_before_lifecycle_mutation() {
+    let (market, _, _) = symbolic_ids();
+    let mut config = V15Config::public_user_fund(2, 0, 1);
+    config.asset_activation_cooldown_slots = 3;
+    let mut group = MarketGroupV15::new(market, config).unwrap();
+
+    group.assets[0].lifecycle = AssetLifecycleV15::Retired;
+    group.activate_empty_asset_not_atomic(0, 7, 1).unwrap();
+    group.assets[1].lifecycle = AssetLifecycleV15::Retired;
+    let before = group;
+
+    let result = group.activate_empty_asset_not_atomic(1, 7, 2);
+
+    kani::cover!(
+        result == Err(V15Error::LockActive),
+        "v15 activation cooldown rejection reachable"
+    );
+    assert_eq!(result, Err(V15Error::LockActive));
+    assert_eq!(group.assets[1], before.assets[1]);
+    assert_eq!(group.asset_activation_count, before.asset_activation_count);
+    assert_eq!(
+        group.last_asset_activation_slot,
+        before.last_asset_activation_slot
+    );
+    assert_eq!(group.risk_epoch, before.risk_epoch);
+    assert_eq!(group.asset_set_epoch, before.asset_set_epoch);
 }
 
 #[kani::proof]

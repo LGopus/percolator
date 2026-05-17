@@ -1,13 +1,14 @@
 use percolator::v15::{
-    account_equity, risk_notional_ceil, AssetStateV15Account, CloseProgressLedgerV15, HLockLaneV15,
-    HealthCertV15Account, LiquidationRequestV15, MarketGroupV15, MarketGroupV15Account,
-    MarketModeV15, PermissionlessCrankActionV15, PermissionlessCrankRequestV15,
-    PermissionlessProgressOutcomeV15, PermissionlessRecoveryReasonV15, PortfolioAccountV15,
-    PortfolioAccountV15Account, PortfolioLegV15, PortfolioLegV15Account, ProvenanceHeaderV15,
-    ProvenanceHeaderV15Account, RebalanceRequestV15, ResolvedCloseOutcomeV15,
-    ResolvedPayoutLedgerV15, SideModeV15, SideV15, TradeRequestV15, V15Config, V15ConfigAccount,
-    V15Error, V15OptionalRecoveryReasonAccount, V15PodI128, V15PodU128, V15PodU16, V15PodU32,
-    V15PodU64, V15_DOMAIN_COUNT, V15_MAX_PORTFOLIO_ASSETS_N,
+    account_equity, risk_notional_ceil, AssetLifecycleV15, AssetStateV15Account,
+    CloseProgressLedgerV15, HLockLaneV15, HealthCertV15Account, LiquidationRequestV15,
+    MarketGroupV15, MarketGroupV15Account, MarketModeV15, PermissionlessCrankActionV15,
+    PermissionlessCrankRequestV15, PermissionlessProgressOutcomeV15,
+    PermissionlessRecoveryReasonV15, PortfolioAccountV15, PortfolioAccountV15Account,
+    PortfolioLegV15, PortfolioLegV15Account, ProvenanceHeaderV15, ProvenanceHeaderV15Account,
+    RebalanceRequestV15, ResolvedCloseOutcomeV15, ResolvedPayoutLedgerV15, SideModeV15, SideV15,
+    TradeRequestV15, V15Config, V15ConfigAccount, V15Error, V15OptionalRecoveryReasonAccount,
+    V15PodI128, V15PodU128, V15PodU16, V15PodU32, V15PodU64, V15_DOMAIN_COUNT,
+    V15_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE, MAX_PROTOCOL_FEE_ABS, POS_SCALE,
@@ -215,6 +216,13 @@ fn v15_persisted_account_wire_rejects_invalid_bool_enum_and_option_encoding() {
     bad_side_mode.assets[0].mode_long = 9;
     assert_eq!(bad_side_mode.try_to_runtime(), Err(V15Error::InvalidConfig));
 
+    let mut bad_asset_lifecycle = MarketGroupV15Account::from_runtime(&g);
+    bad_asset_lifecycle.assets[0].lifecycle = 9;
+    assert_eq!(
+        bad_asset_lifecycle.try_to_runtime(),
+        Err(V15Error::InvalidConfig)
+    );
+
     let mut bad_option = MarketGroupV15Account::from_runtime(&g);
     bad_option.recovery_reason.present = 0;
     bad_option.recovery_reason.value = 1;
@@ -238,6 +246,148 @@ fn v15_hlock_is_permissionless_state_not_oracle_input() {
 
     a.b_stale_state = true;
     assert_eq!(g.h_lock_lane(Some(&a), false), Ok(HLockLaneV15::HMax));
+}
+
+#[test]
+fn v15_asset_lifecycle_blocks_new_risk_unless_active() {
+    let mut g = group();
+    let mut a = account();
+    g.mark_asset_drain_only_not_atomic(0).unwrap();
+    let before_asset = g.assets[0];
+
+    assert_eq!(
+        g.attach_leg(&mut a, 0, SideV15::Long, POS_SCALE as i128),
+        Err(V15Error::LockActive)
+    );
+    assert_eq!(g.assets[0], before_asset);
+    assert_eq!(a.active_bitmap, 0);
+
+    let mut long = account();
+    let mut short = account_with_id(9);
+    g.deposit_not_atomic(&mut long, 10_000).unwrap();
+    g.deposit_not_atomic(&mut short, 10_000).unwrap();
+    let res = g.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV15 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
+    );
+    assert_eq!(res, Err(V15Error::LockActive));
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.assets[0].oi_eff_short_q, 0);
+}
+
+#[test]
+fn v15_asset_lifecycle_drain_only_allows_reduction_but_not_increase() {
+    let mut g = group();
+    let mut reducing_short = account();
+    let mut reducing_long = account_with_id(8);
+    g.deposit_not_atomic(&mut reducing_short, 10_000).unwrap();
+    g.deposit_not_atomic(&mut reducing_long, 10_000).unwrap();
+    g.attach_leg(&mut reducing_short, 0, SideV15::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut reducing_long, 0, SideV15::Long, POS_SCALE as i128)
+        .unwrap();
+    g.mark_asset_drain_only_not_atomic(0).unwrap();
+
+    let out = g
+        .execute_trade_with_fee_not_atomic(
+            &mut reducing_short,
+            &mut reducing_long,
+            TradeRequestV15 {
+                asset_index: 0,
+                size_q: POS_SCALE / 2,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            &[100; V15_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+    assert_eq!(out.notional, 50);
+    assert_eq!(reducing_long.legs[0].basis_pos_q, (POS_SCALE / 2) as i128);
+    assert_eq!(
+        reducing_short.legs[0].basis_pos_q,
+        -((POS_SCALE / 2) as i128)
+    );
+
+    let increase = g.execute_trade_with_fee_not_atomic(
+        &mut reducing_short,
+        &mut reducing_long,
+        TradeRequestV15 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
+    );
+    assert_eq!(increase, Err(V15Error::LockActive));
+}
+
+#[test]
+fn v15_asset_retire_and_activation_require_empty_asset_state_and_invalidate_certs() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 10_000).unwrap();
+    g.attach_leg(&mut a, 0, SideV15::Long, 1).unwrap();
+    assert_eq!(
+        g.retire_empty_asset_not_atomic(0),
+        Err(V15Error::LockActive),
+        "retirement must fail closed while OI or stored positions remain"
+    );
+    g.clear_leg(&mut a, 0).unwrap();
+    g.retire_empty_asset_not_atomic(0).unwrap();
+    assert_eq!(g.assets[0].lifecycle, AssetLifecycleV15::Retired);
+
+    g.full_account_refresh(&mut a, &[100; V15_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert!(a.health_cert.valid);
+    let cert_epoch = a.health_cert.cert_risk_epoch;
+    let risk_epoch_before = g.risk_epoch;
+    let asset_set_epoch_before = g.asset_set_epoch;
+    g.activate_empty_asset_not_atomic(0, 100, g.current_slot + 1)
+        .unwrap();
+
+    assert_eq!(g.assets[0].lifecycle, AssetLifecycleV15::Active);
+    assert!(g.risk_epoch > risk_epoch_before);
+    assert!(g.asset_set_epoch > asset_set_epoch_before);
+    assert_ne!(a.health_cert.cert_risk_epoch, g.risk_epoch);
+    assert_eq!(a.health_cert.cert_risk_epoch, cert_epoch);
+    assert_eq!(
+        g.ensure_favorable_action_allowed(&a),
+        Err(V15Error::Stale),
+        "certified-favorable actions must fail closed until account refreshes under the new asset set"
+    );
+}
+
+#[test]
+fn v15_asset_activation_cooldown_rate_limits_asset_set_churn() {
+    let mut g = group();
+    g.config.asset_activation_cooldown_slots = 3;
+
+    g.retire_empty_asset_not_atomic(0).unwrap();
+    g.activate_empty_asset_not_atomic(0, 100, 1).unwrap();
+    assert_eq!(g.asset_activation_count, 1);
+    assert_eq!(g.last_asset_activation_slot, 1);
+
+    g.retire_empty_asset_not_atomic(1).unwrap();
+    let before = g.assets[1];
+    assert_eq!(
+        g.activate_empty_asset_not_atomic(1, 100, 2),
+        Err(V15Error::LockActive),
+        "a second activation before the configured cooldown must fail closed"
+    );
+    assert_eq!(g.assets[1], before);
+
+    g.activate_empty_asset_not_atomic(1, 100, 4).unwrap();
+    assert_eq!(g.asset_activation_count, 2);
+    assert_eq!(g.last_asset_activation_slot, 4);
+    assert_eq!(g.assets[1].lifecycle, AssetLifecycleV15::Active);
 }
 
 #[test]
