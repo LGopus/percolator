@@ -3854,6 +3854,22 @@ fn v15_side_reset_cannot_finalize_until_prior_epoch_positions_clear() {
 }
 
 #[test]
+fn v15_begin_full_drain_reset_rejects_side_already_reset_pending() {
+    let mut g = group();
+    g.begin_full_drain_reset(0, SideV15::Long).unwrap();
+    let before = g;
+
+    assert_eq!(
+        g.begin_full_drain_reset(0, SideV15::Long),
+        Err(V15Error::LockActive),
+        "a second reset must not advance epochs while prior-epoch accounts may still exist"
+    );
+    assert_eq!(g.assets[0].mode_long, SideModeV15::ResetPending);
+    assert_eq!(g.assets[0].epoch_long, before.assets[0].epoch_long);
+    assert_eq!(g.risk_epoch, before.risk_epoch);
+}
+
+#[test]
 fn v15_quantity_adl_reduces_opposing_a_or_starts_reset_after_residual_durable() {
     let mut g = group();
     let mut closing = account();

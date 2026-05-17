@@ -4388,6 +4388,9 @@ impl MarketGroupV15 {
         let asset = &mut self.assets[asset_index];
         match side {
             SideV15::Long => {
+                if asset.mode_long == SideModeV15::ResetPending {
+                    return Err(V15Error::LockActive);
+                }
                 if asset.oi_eff_long_q != 0 {
                     return Err(V15Error::InvalidLeg);
                 }
@@ -4413,6 +4416,9 @@ impl MarketGroupV15 {
                 asset.mode_long = SideModeV15::ResetPending;
             }
             SideV15::Short => {
+                if asset.mode_short == SideModeV15::ResetPending {
+                    return Err(V15Error::LockActive);
+                }
                 if asset.oi_eff_short_q != 0 {
                     return Err(V15Error::InvalidLeg);
                 }

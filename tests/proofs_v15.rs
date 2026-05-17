@@ -2996,6 +2996,37 @@ fn proof_v15_side_reset_finalize_requires_prior_epoch_positions_clear() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_begin_full_drain_reset_forbidden_while_reset_pending() {
+    let reset_long: bool = kani::any();
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let side = if reset_long {
+        SideV15::Long
+    } else {
+        SideV15::Short
+    };
+
+    group.begin_full_drain_reset(0, side).unwrap();
+    let before_asset = group.assets[0];
+    let before_risk_epoch = group.risk_epoch;
+    let result = group.begin_full_drain_reset(0, side);
+
+    kani::cover!(
+        reset_long,
+        "v15 repeated long reset-pending guard reachable"
+    );
+    kani::cover!(
+        !reset_long,
+        "v15 repeated short reset-pending guard reachable"
+    );
+    assert_eq!(result, Err(V15Error::LockActive));
+    assert_eq!(group.assets[0], before_asset);
+    assert_eq!(group.risk_epoch, before_risk_epoch);
+}
+
+#[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
 fn proof_v15_reset_pending_epoch_start_snapshots_prevent_prior_epoch_resurrection() {
