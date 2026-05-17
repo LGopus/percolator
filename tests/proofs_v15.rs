@@ -5594,7 +5594,84 @@ fn proof_v15_pending_domain_barrier_blocks_participants_until_residual_finalized
         group.pending_domain_loss_barrier_count(0, SideV15::Short),
         Ok(0)
     ));
+    assert!(matches!(
+        group.clear_leg(&mut participant, 0),
+        Err(V15Error::Stale)
+    ));
+    let b_first = group
+        .settle_account_b_chunk(&mut participant, 0, u128::MAX)
+        .unwrap();
+    assert_eq!(b_first.remaining_after, 1);
+    let b_second = group
+        .settle_account_b_chunk(&mut participant, 0, u128::MAX)
+        .unwrap();
+    assert_eq!(b_second.remaining_after, 0);
     assert!(matches!(group.clear_leg(&mut participant, 0), Ok(())));
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v15_single_domain_close_lock_rejects_second_origin_until_first_finalized() {
+    let (market, _, owner) = concrete_ids();
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
+    cfg.public_b_chunk_atoms = 1;
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
+    let mut first_bankrupt =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut second_bankrupt =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
+    let mut participant =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [6; 32], owner));
+
+    group
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
+        .unwrap();
+    let first = group
+        .book_bankruptcy_residual_chunk_for_account(&mut first_bankrupt, 0, SideV15::Long, 2)
+        .unwrap();
+    kani::cover!(
+        first.booked_loss == 1,
+        "v15 first active domain close leaves pending residual"
+    );
+    assert_eq!(first.booked_loss, 1);
+    assert_eq!(group.pending_domain_loss_barriers[1], 1);
+
+    let before_second_ledger = second_bankrupt.close_progress;
+    let before_domain_barrier = group.pending_domain_loss_barriers[1];
+    let before_b_short = group.assets[0].b_short_num;
+    let second_blocked =
+        group.book_bankruptcy_residual_chunk_for_account(&mut second_bankrupt, 0, SideV15::Long, 1);
+    assert_eq!(second_blocked, Err(V15Error::LockActive));
+    assert_eq!(second_bankrupt.close_progress, before_second_ledger);
+    assert_eq!(group.pending_domain_loss_barriers[1], before_domain_barrier);
+    assert_eq!(group.assets[0].b_short_num, before_b_short);
+
+    let complete_first = group
+        .book_bankruptcy_residual_chunk_for_account(&mut first_bankrupt, 0, SideV15::Long, 2)
+        .unwrap();
+    assert_eq!(complete_first.booked_loss, 1);
+    assert!(first_bankrupt.close_progress.finalized);
+    assert_eq!(group.pending_domain_loss_barriers[1], 0);
+
+    let second = group
+        .book_bankruptcy_residual_chunk_for_account(&mut second_bankrupt, 0, SideV15::Long, 1)
+        .unwrap();
+    assert_eq!(second.booked_loss, 1);
+    assert!(second_bankrupt.close_progress.finalized);
+}
+
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_v15_public_invariants_reject_multiple_pending_barriers_per_domain() {
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    group.pending_domain_loss_barriers[1] = 2;
+    assert_eq!(
+        group.assert_public_invariants(),
+        Err(V15Error::InvalidConfig)
+    );
 }
 
 #[kani::proof]

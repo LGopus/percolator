@@ -3129,6 +3129,66 @@ fn v15_pending_domain_loss_barrier_blocks_other_participants_until_residual_done
 }
 
 #[test]
+fn v15_single_domain_close_lock_rejects_second_origin_until_first_finalized() {
+    let (market, _, owner) = ids();
+    let mut cfg = V15Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV15::new(market, cfg).unwrap();
+    let mut first_bankrupt =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut second_bankrupt =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
+    let mut participant =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [6; 32], owner));
+
+    g.attach_leg(&mut participant, 0, SideV15::Short, -10)
+        .unwrap();
+    let first = g
+        .book_bankruptcy_residual_chunk_for_account(&mut first_bankrupt, 0, SideV15::Long, 2)
+        .unwrap();
+    assert_eq!(first.booked_loss, 1);
+    assert_eq!(
+        g.pending_domain_loss_barrier_count(0, SideV15::Short),
+        Ok(1)
+    );
+
+    let before_second_ledger = second_bankrupt.close_progress;
+    let before_barriers = g.pending_domain_loss_barriers;
+    let before_b_short = g.assets[0].b_short_num;
+    assert_eq!(
+        g.book_bankruptcy_residual_chunk_for_account(&mut second_bankrupt, 0, SideV15::Long, 1),
+        Err(V15Error::LockActive),
+        "a domain can have only one active pending close origin"
+    );
+    assert_eq!(second_bankrupt.close_progress, before_second_ledger);
+    assert_eq!(g.pending_domain_loss_barriers, before_barriers);
+    assert_eq!(g.assets[0].b_short_num, before_b_short);
+
+    let complete_first = g
+        .book_bankruptcy_residual_chunk_for_account(&mut first_bankrupt, 0, SideV15::Long, 2)
+        .unwrap();
+    assert_eq!(complete_first.booked_loss, 1);
+    assert!(first_bankrupt.close_progress.finalized);
+    assert_eq!(
+        g.pending_domain_loss_barrier_count(0, SideV15::Short),
+        Ok(0)
+    );
+
+    let second = g
+        .book_bankruptcy_residual_chunk_for_account(&mut second_bankrupt, 0, SideV15::Long, 1)
+        .unwrap();
+    assert_eq!(second.booked_loss, 1);
+    assert!(second_bankrupt.close_progress.finalized);
+}
+
+#[test]
+fn v15_public_invariants_reject_multiple_pending_barriers_per_domain() {
+    let mut g = group();
+    g.pending_domain_loss_barriers[1] = 2;
+    assert_eq!(g.assert_public_invariants(), Err(V15Error::InvalidConfig));
+}
+
+#[test]
 fn v15_pending_domain_loss_barrier_allows_partial_risk_reduction_with_weight_obligation_preserved()
 {
     let (market, _, owner) = ids();

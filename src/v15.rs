@@ -3782,6 +3782,10 @@ impl MarketGroupV15 {
         if account.close_progress.active {
             return Err(V15Error::LockActive);
         }
+        let domain = self.insurance_domain_index(asset_index, domain_side)?;
+        if self.pending_domain_loss_barriers[domain] != 0 {
+            return Err(V15Error::LockActive);
+        }
         let close_id = account.close_progress.close_id.saturating_add(1).max(1);
         let ledger = CloseProgressLedgerV15 {
             active: true,
@@ -3799,7 +3803,6 @@ impl MarketGroupV15 {
             ..CloseProgressLedgerV15::EMPTY
         };
         self.validate_close_progress_ledger(ledger)?;
-        let domain = self.insurance_domain_index(asset_index, domain_side)?;
         self.pending_domain_loss_barriers[domain] = self.pending_domain_loss_barriers[domain]
             .checked_add(1)
             .ok_or(V15Error::CounterOverflow)?;
@@ -4462,6 +4465,9 @@ impl MarketGroupV15 {
         let mut d = 0;
         while d < V15_DOMAIN_COUNT {
             if self.insurance_domain_spent[d] > self.insurance_domain_budget[d] {
+                return Err(V15Error::InvalidConfig);
+            }
+            if self.pending_domain_loss_barriers[d] > 1 {
                 return Err(V15Error::InvalidConfig);
             }
             if d >= self.config.max_portfolio_assets as usize * 2

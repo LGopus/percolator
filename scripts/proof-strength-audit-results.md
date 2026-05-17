@@ -10,18 +10,18 @@ Static inventory from the current `v15` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 174 |
-| Kani proofs | 169 |
-| Kani cover checks | 263 |
+| Rust spec/fuzz tests | 176 |
+| Kani proofs | 171 |
+| Kani cover checks | 264 |
 | Kani assumptions | 131 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v15_spec_tests.rs` | 173 | 0 | 0 |
+| `tests/v15_spec_tests.rs` | 175 | 0 | 0 |
 | `tests/v15_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v15.rs` | 0 | 162 | 255 |
+| `tests/proofs_v15.rs` | 0 | 164 | 256 |
 | `tests/proofs_v15_arithmetic.rs` | 0 | 7 | 8 |
 
 The v15 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v15_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 169 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 171 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -139,6 +139,8 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v15_pending_domain_barrier_allows_rebalance_full_exit_as_flat_weight_obligation` | 232.63057s | PASS |
 | `proof_v15_pending_obligation_blocks_side_reset_until_clear` | 259.52087s | PASS |
 | `proof_v15_flat_pending_obligation_cannot_clear_before_b_settlement` | 304.95313s | PASS |
+| `proof_v15_public_invariants_reject_multiple_pending_barriers_per_domain` | 1.4656148s | PASS |
+| `proof_v15_single_domain_close_lock_rejects_second_origin_until_first_finalized` | 24.928394s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -214,7 +216,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `domain_budgeted_insurance_prevents_bad_asset_global_insurance_drain` | `v15_bad_asset_cannot_spend_unrelated_domain_insurance_budget`; `proof_v15_bad_asset_cannot_spend_unrelated_domain_insurance_budget`; domain-budget liquidation proofs |
 | `liquidation_order_cannot_choose_residual_domain` | `v15_liquidation_residual_domain_is_opposite_side_for_long_and_short`; both liquidation residual proofs exercise production `liquidate_account_not_atomic` with caller-independent request fields and assert only the opposite-side domain is spent |
 | `portfolio_insurance_allocation_is_caller_independent` | Domain-budget liquidation tests/proofs; unrelated-budget proof shows global insurance cannot be drained outside the selected domain; long/short residual-domain proofs show insurance spend is derived from bankrupt exposure side, not caller liquidation ordering |
-| `pending_domain_loss_barrier_blocks_weight_exit_until_residual_durable` | `v15_pending_domain_loss_barrier_blocks_other_participants_until_residual_done`; `v15_pending_domain_loss_barrier_blocks_side_reset_before_residual_done`; `v15_pending_obligation_blocks_side_reset_until_obligation_account_clears`; `v15_pending_domain_loss_barrier_does_not_freeze_unrelated_positive_credit`; `proof_v15_pending_domain_barrier_blocks_participants_until_residual_finalized`; `proof_v15_pending_domain_barrier_blocks_side_reset_before_mutation`; `proof_v15_pending_obligation_blocks_side_reset_until_clear`; `proof_v15_pending_domain_barrier_does_not_freeze_unrelated_positive_credit`; full exits are covered as zero-basis obligation exits rather than hard rejects, and side reset is blocked until the obligation account clears |
+| `pending_domain_loss_barrier_blocks_weight_exit_until_residual_durable` | `v15_pending_domain_loss_barrier_blocks_other_participants_until_residual_done`; `v15_pending_domain_loss_barrier_blocks_side_reset_before_residual_done`; `v15_pending_obligation_blocks_side_reset_until_obligation_account_clears`; `v15_single_domain_close_lock_rejects_second_origin_until_first_finalized`; `v15_pending_domain_loss_barrier_does_not_freeze_unrelated_positive_credit`; `proof_v15_pending_domain_barrier_blocks_participants_until_residual_finalized`; `proof_v15_pending_domain_barrier_blocks_side_reset_before_mutation`; `proof_v15_single_domain_close_lock_rejects_second_origin_until_first_finalized`; `proof_v15_public_invariants_reject_multiple_pending_barriers_per_domain`; `proof_v15_pending_obligation_blocks_side_reset_until_clear`; `proof_v15_pending_domain_barrier_does_not_freeze_unrelated_positive_credit`; full exits are covered as zero-basis obligation exits rather than hard rejects, side reset is blocked until the obligation account clears, and a domain can have only one active pending close origin |
 | `pending_barrier_allows_risk_reduction_with_weight_obligation_preserved` | `v15_pending_domain_loss_barrier_allows_partial_risk_reduction_with_weight_obligation_preserved`; `v15_pending_domain_loss_barrier_allows_full_trade_exit_as_flat_weight_obligation`; `v15_pending_domain_loss_barrier_allows_rebalance_reduction_with_weight_obligation_preserved`; `v15_pending_domain_loss_barrier_allows_rebalance_full_exit_as_flat_weight_obligation`; `v15_flat_pending_obligation_must_settle_b_loss_before_clear`; `proof_v15_pending_domain_barrier_allows_rebalance_reduction_with_weight_obligation_preserved`; `proof_v15_pending_domain_barrier_allows_trade_reduction_with_weight_obligation_preserved`; `proof_v15_pending_domain_barrier_allows_full_trade_exit_as_flat_weight_obligation`; `proof_v15_pending_domain_barrier_allows_rebalance_full_exit_as_flat_weight_obligation`; `proof_v15_flat_pending_obligation_cannot_clear_before_b_settlement`; same-side reductions, including full exits, preserve the account's pre-barrier loss weight as a flat obligation until the barrier clears, and a flat obligation cannot clear before K/F/B settlement catches up |
 | `oi_positive_requires_loss_weight_or_recovery` | `v15_public_invariants_reject_oi_loss_weight_shape_mismatch`; `proof_v15_public_invariants_reject_hard_global_bounds`; attach/clear and quantity-ADL OI symmetry tests/proofs |
 | `live_oi_symmetric_in_live_mode` | `v15_public_invariants_reject_live_oi_imbalance`; `proof_v15_public_invariants_reject_hard_global_bounds`; trade, liquidation, rebalance, and quantity-ADL OI symmetry tests/proofs |
@@ -297,9 +299,9 @@ Strength indicators:
 
 | Check | Result |
 |---|---:|
-| Harnesses over v15 production engine/wire methods | 162 |
+| Harnesses over v15 production engine/wire methods | 164 |
 | Harnesses over shared production arithmetic helpers | 7 |
-| Harnesses with `kani::cover!` reachability checks | 138 |
+| Harnesses with `kani::cover!` reachability checks | 139 |
 | Explicit `kani::assume(false)` / `assume(false)` findings | 0 |
 | Confirmed vacuous harnesses | 0 |
 | Confirmed weak harnesses | 0 |
@@ -330,5 +332,5 @@ property families have been reviewed and either ported to v15 production-code
 tests/proofs or retired as slab/wrapper/v12-queue-specific.
 
 The only open audit-maintenance item is to rerun `scripts/run_kani_full_audit.sh`
-against the current 169-proof inventory and replace the older 57-proof timing
+against the current 171-proof inventory and replace the older 57-proof timing
 artifacts.
