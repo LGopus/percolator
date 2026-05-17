@@ -4032,6 +4032,46 @@ fn v15_account_shape_rejects_malformed_quantity_adl_close_progress() {
 }
 
 #[test]
+fn v15_account_shape_rejects_malformed_canceled_close_progress() {
+    let g = group();
+    let mut canceled_with_progress = account();
+    canceled_with_progress.close_progress = CloseProgressLedgerV15 {
+        canceled: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 5,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        insurance_spent: 1,
+        residual_remaining: 4,
+        ..CloseProgressLedgerV15::EMPTY
+    };
+    assert_eq!(
+        g.validate_account_shape(&canceled_with_progress),
+        Err(V15Error::InvalidLeg)
+    );
+
+    let mut canceled_active = account();
+    canceled_active.close_progress = CloseProgressLedgerV15 {
+        active: true,
+        canceled: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 5,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        residual_remaining: 5,
+        ..CloseProgressLedgerV15::EMPTY
+    };
+    assert_eq!(
+        g.validate_account_shape(&canceled_active),
+        Err(V15Error::InvalidLeg)
+    );
+}
+
+#[test]
 fn v15_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
     let mut g = group();
     let mut closing = account();

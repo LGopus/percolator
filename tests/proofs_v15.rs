@@ -6444,6 +6444,42 @@ fn proof_v15_account_shape_rejects_malformed_quantity_adl_close_progress() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
+fn proof_v15_account_shape_rejects_malformed_canceled_close_progress() {
+    let active_or_progress: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    account.close_progress = CloseProgressLedgerV15 {
+        active: active_or_progress,
+        canceled: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 5,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        insurance_spent: if active_or_progress { 0 } else { 1 },
+        residual_remaining: if active_or_progress { 5 } else { 4 },
+        ..CloseProgressLedgerV15::EMPTY
+    };
+
+    let result = group.validate_account_shape(&account);
+
+    kani::cover!(
+        active_or_progress,
+        "v15 canceled active close ledger rejected"
+    );
+    kani::cover!(
+        !active_or_progress,
+        "v15 canceled close ledger with irreversible progress rejected"
+    );
+    assert_eq!(result, Err(V15Error::InvalidLeg));
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
 fn proof_v15_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
     let closing_long: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
