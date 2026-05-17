@@ -1688,13 +1688,13 @@ fn v14_equity_active_accrual_commits_one_bounded_loss_stale_segment() {
 }
 
 #[test]
-fn v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
+fn v14_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
     let mut g = group();
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
     let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 95);
-    g.active_bankrupt_close_present = true;
+    g.pending_domain_loss_barriers[0] = 1;
 
     let a_long_before = g.assets[0].a_long;
     let b_short_before = g.assets[0].b_short_num;
@@ -1709,7 +1709,7 @@ fn v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
     assert_eq!(g.assets[0].a_long, a_long_before);
     assert_eq!(g.assets[0].b_short_num, b_short_before);
     assert_eq!(g.assets[0].oi_eff_long_q, oi_long_before);
-    assert!(g.active_bankrupt_close_present);
+    assert_eq!(g.pending_domain_loss_barriers[0], 1);
 }
 
 #[test]
@@ -3638,7 +3638,7 @@ fn v14_resolved_close_returns_progress_after_partial_b_settlement() {
 
 #[test]
 fn v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
-    for case in 0..8 {
+    for case in 0..7 {
         let mut g = group();
         let mut a = account();
         g.vault = 10;
@@ -3647,13 +3647,12 @@ fn v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
         g.pnl_pos_bound_tot = 10;
         g.resolve_market_not_atomic(1).unwrap();
         match case {
-            0 => g.active_bankrupt_close_present = true,
-            1 => g.b_stale_account_count = 1,
-            2 => g.stale_certificate_count = 1,
-            3 => g.negative_pnl_account_count = 1,
-            4 => g.assets[0].stored_pos_count_long = 1,
-            5 => g.assets[0].stored_pos_count_short = 1,
-            6 => g.assets[0].stale_account_count_long = 1,
+            0 => g.b_stale_account_count = 1,
+            1 => g.stale_certificate_count = 1,
+            2 => g.negative_pnl_account_count = 1,
+            3 => g.assets[0].stored_pos_count_long = 1,
+            4 => g.assets[0].stored_pos_count_short = 1,
+            5 => g.assets[0].stale_account_count_long = 1,
             _ => g.assets[0].stale_account_count_short = 1,
         }
 

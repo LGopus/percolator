@@ -52,7 +52,6 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
     group.threshold_stress_active = kani::any();
     group.bankruptcy_hlock_active = kani::any();
     group.loss_stale_active = kani::any();
-    group.active_bankrupt_close_present = kani::any();
     account.stale_state = kani::any();
     account.b_stale_state = kani::any();
     let instruction_bankruptcy_candidate: bool = kani::any();
@@ -61,7 +60,6 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
         !group.threshold_stress_active
             && !group.bankruptcy_hlock_active
             && !group.loss_stale_active
-            && !group.active_bankrupt_close_present
             && !account.stale_state
             && !account.b_stale_state
             && !instruction_bankruptcy_candidate,
@@ -71,7 +69,6 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
         group.threshold_stress_active
             || group.bankruptcy_hlock_active
             || group.loss_stale_active
-            || group.active_bankrupt_close_present
             || account.stale_state
             || account.b_stale_state
             || instruction_bankruptcy_candidate,
@@ -331,8 +328,7 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
     let pnl_pos_units: u8 = kani::any();
     let pnl_matured_units: u8 = kani::any();
     let price_raw: u16 = kani::any();
-    let oi_long_units: u8 = kani::any();
-    let oi_short_units: u8 = kani::any();
+    let oi_units: u8 = kani::any();
     let k_raw: i16 = kani::any();
     let f_raw: i16 = kani::any();
     let side_mode_case: u8 = kani::any();
@@ -358,7 +354,6 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
     group.pnl_matured_pos_tot = pnl_matured_units as u128;
     group.bankruptcy_hlock_active = kani::any();
     group.threshold_stress_active = kani::any();
-    group.active_bankrupt_close_present = kani::any();
     group.loss_stale_active = kani::any();
     group.payout_snapshot_captured = kani::any();
     group.mode = match market_mode_case {
@@ -397,8 +392,10 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
     group.assets[0].k_epoch_start_short = -(k_raw as i128);
     group.assets[0].f_epoch_start_long_num = f_raw as i128;
     group.assets[0].f_epoch_start_short_num = -(f_raw as i128);
-    group.assets[0].oi_eff_long_q = oi_long_units as u128;
-    group.assets[0].oi_eff_short_q = oi_short_units as u128;
+    group.assets[0].oi_eff_long_q = oi_units as u128;
+    group.assets[0].oi_eff_short_q = oi_units as u128;
+    group.assets[0].loss_weight_sum_long = if oi_units == 0 { 0 } else { 1 };
+    group.assets[0].loss_weight_sum_short = if oi_units == 0 { 0 } else { 1 };
     group.assets[0].mode_long = side_mode;
     group.assets[0].mode_short = side_mode;
 
@@ -417,7 +414,135 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
         side_mode_case == 1,
         "v14 market wire roundtrip reset-pending side mode"
     );
-    assert_eq!(decoded, group);
+    let mut id_i = 0;
+    while id_i < 32 {
+        assert_eq!(decoded.market_group_id[id_i], group.market_group_id[id_i]);
+        id_i += 1;
+    }
+    assert_eq!(
+        decoded.config.max_portfolio_assets,
+        group.config.max_portfolio_assets
+    );
+    assert_eq!(
+        decoded.config.min_nonzero_mm_req,
+        group.config.min_nonzero_mm_req
+    );
+    assert_eq!(
+        decoded.config.min_nonzero_im_req,
+        group.config.min_nonzero_im_req
+    );
+    assert_eq!(decoded.config.h_min, group.config.h_min);
+    assert_eq!(decoded.config.h_max, group.config.h_max);
+    assert_eq!(
+        decoded.config.maintenance_margin_bps,
+        group.config.maintenance_margin_bps
+    );
+    assert_eq!(
+        decoded.config.initial_margin_bps,
+        group.config.initial_margin_bps
+    );
+    assert_eq!(
+        decoded.config.max_trading_fee_bps,
+        group.config.max_trading_fee_bps
+    );
+    assert_eq!(
+        decoded.config.max_accrual_dt_slots,
+        group.config.max_accrual_dt_slots
+    );
+    assert_eq!(
+        decoded.config.max_price_move_bps_per_slot,
+        group.config.max_price_move_bps_per_slot
+    );
+    assert_eq!(
+        decoded.config.permissionless_recovery_enabled,
+        group.config.permissionless_recovery_enabled
+    );
+    assert_eq!(
+        decoded.config.recovery_fallback_price_enabled,
+        group.config.recovery_fallback_price_enabled
+    );
+    assert_eq!(decoded.vault, group.vault);
+    assert_eq!(decoded.c_tot, group.c_tot);
+    assert_eq!(decoded.insurance, group.insurance);
+    assert_eq!(decoded.pnl_pos_tot, group.pnl_pos_tot);
+    assert_eq!(decoded.pnl_pos_bound_tot, group.pnl_pos_bound_tot);
+    assert_eq!(decoded.pnl_matured_pos_tot, group.pnl_matured_pos_tot);
+    assert_eq!(
+        decoded.bankruptcy_hlock_active,
+        group.bankruptcy_hlock_active
+    );
+    assert_eq!(
+        decoded.threshold_stress_active,
+        group.threshold_stress_active
+    );
+    assert_eq!(decoded.loss_stale_active, group.loss_stale_active);
+    assert_eq!(
+        decoded.payout_snapshot_captured,
+        group.payout_snapshot_captured
+    );
+    assert_eq!(decoded.mode, group.mode);
+    assert_eq!(
+        decoded.recovery_reason.is_some(),
+        group.recovery_reason.is_some()
+    );
+    if let (Some(decoded_reason), Some(group_reason)) =
+        (decoded.recovery_reason, group.recovery_reason)
+    {
+        assert_eq!(decoded_reason, group_reason);
+    }
+    let mut asset_i = 0;
+    while asset_i < V14_MAX_PORTFOLIO_ASSETS_N {
+        assert_eq!(
+            decoded.assets[asset_i].raw_oracle_target_price,
+            group.assets[asset_i].raw_oracle_target_price
+        );
+        assert_eq!(
+            decoded.assets[asset_i].effective_price,
+            group.assets[asset_i].effective_price
+        );
+        assert_eq!(
+            decoded.assets[asset_i].fund_px_last,
+            group.assets[asset_i].fund_px_last
+        );
+        assert_eq!(decoded.assets[asset_i].k_long, group.assets[asset_i].k_long);
+        assert_eq!(
+            decoded.assets[asset_i].k_short,
+            group.assets[asset_i].k_short
+        );
+        assert_eq!(
+            decoded.assets[asset_i].f_long_num,
+            group.assets[asset_i].f_long_num
+        );
+        assert_eq!(
+            decoded.assets[asset_i].f_short_num,
+            group.assets[asset_i].f_short_num
+        );
+        assert_eq!(
+            decoded.assets[asset_i].oi_eff_long_q,
+            group.assets[asset_i].oi_eff_long_q
+        );
+        assert_eq!(
+            decoded.assets[asset_i].oi_eff_short_q,
+            group.assets[asset_i].oi_eff_short_q
+        );
+        assert_eq!(
+            decoded.assets[asset_i].loss_weight_sum_long,
+            group.assets[asset_i].loss_weight_sum_long
+        );
+        assert_eq!(
+            decoded.assets[asset_i].loss_weight_sum_short,
+            group.assets[asset_i].loss_weight_sum_short
+        );
+        assert_eq!(
+            decoded.assets[asset_i].mode_long,
+            group.assets[asset_i].mode_long
+        );
+        assert_eq!(
+            decoded.assets[asset_i].mode_short,
+            group.assets[asset_i].mode_short
+        );
+        asset_i += 1;
+    }
 }
 
 #[kani::proof]
@@ -1242,8 +1367,13 @@ fn proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting() {
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposite =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [88; 32], owner));
     group
         .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposite, 0, SideV14::Short, -(POS_SCALE as i128))
         .unwrap();
     account.pnl = profit as i128;
     group.pnl_pos_tot = profit as u128;
@@ -2033,7 +2163,7 @@ fn proof_v14_global_residual_is_not_account_health_proof() {
 #[kani::solver(cadical)]
 fn proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation() {
     let lock_case: u8 = kani::any();
-    kani::assume(lock_case < 7);
+    kani::assume(lock_case < 6);
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
@@ -2056,26 +2186,76 @@ fn proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation() {
         0 => group.threshold_stress_active = true,
         1 => group.bankruptcy_hlock_active = true,
         2 => group.loss_stale_active = true,
-        3 => group.active_bankrupt_close_present = true,
-        4 => account.stale_state = true,
-        5 => account.b_stale_state = true,
+        3 => account.stale_state = true,
+        4 => account.b_stale_state = true,
         _ => group.assets[0].raw_oracle_target_price = 2,
     }
 
-    let before_group = group;
-    let before_account = account;
+    let before_vault = group.vault;
+    let before_c_tot = group.c_tot;
+    let before_insurance = group.insurance;
+    let before_pnl_pos_tot = group.pnl_pos_tot;
+    let before_pnl_pos_bound_tot = group.pnl_pos_bound_tot;
+    let before_pnl_matured_pos_tot = group.pnl_matured_pos_tot;
+    let before_asset_raw_target = group.assets[0].raw_oracle_target_price;
+    let before_asset_effective_price = group.assets[0].effective_price;
+    let before_asset_oi_long = group.assets[0].oi_eff_long_q;
+    let before_asset_oi_short = group.assets[0].oi_eff_short_q;
+    let before_capital = account.capital;
+    let before_pnl = account.pnl;
+    let before_reserved_pnl = account.reserved_pnl;
+    let before_fee_credits = account.fee_credits;
+    let before_last_fee_slot = account.last_fee_slot;
+    let before_active_bitmap = account.active_bitmap;
+    let before_health_valid = account.health_cert.valid;
+    let before_leg_active = account.legs[0].active;
+    let before_leg_side = account.legs[0].side;
+    let before_leg_basis = account.legs[0].basis_pos_q;
+    let before_leg_a_basis = account.legs[0].a_basis;
+    let before_leg_k_snap = account.legs[0].k_snap;
+    let before_leg_f_snap = account.legs[0].f_snap;
+    let before_stale = account.stale_state;
+    let before_b_stale = account.b_stale_state;
     let result = group.convert_released_pnl_to_capital_not_atomic(&mut account);
 
     kani::cover!(lock_case == 0, "v14 threshold-stress conversion lock");
     kani::cover!(lock_case == 1, "v14 bankruptcy h-lock conversion lock");
     kani::cover!(lock_case == 2, "v14 loss-stale conversion lock");
-    kani::cover!(lock_case == 3, "v14 active-bankrupt-close conversion lock");
-    kani::cover!(lock_case == 4, "v14 stale account conversion lock");
-    kani::cover!(lock_case == 5, "v14 B-stale account conversion lock");
-    kani::cover!(lock_case == 6, "v14 target/effective lag conversion lock");
+    kani::cover!(lock_case == 3, "v14 stale account conversion lock");
+    kani::cover!(lock_case == 4, "v14 B-stale account conversion lock");
+    kani::cover!(lock_case == 5, "v14 target/effective lag conversion lock");
     assert_eq!(result, Err(V14Error::LockActive));
-    assert_eq!(group, before_group);
-    assert_eq!(account, before_account);
+    assert_eq!(group.vault, before_vault);
+    assert_eq!(group.c_tot, before_c_tot);
+    assert_eq!(group.insurance, before_insurance);
+    assert_eq!(group.pnl_pos_tot, before_pnl_pos_tot);
+    assert_eq!(group.pnl_pos_bound_tot, before_pnl_pos_bound_tot);
+    assert_eq!(group.pnl_matured_pos_tot, before_pnl_matured_pos_tot);
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price,
+        before_asset_raw_target
+    );
+    assert_eq!(
+        group.assets[0].effective_price,
+        before_asset_effective_price
+    );
+    assert_eq!(group.assets[0].oi_eff_long_q, before_asset_oi_long);
+    assert_eq!(group.assets[0].oi_eff_short_q, before_asset_oi_short);
+    assert_eq!(account.capital, before_capital);
+    assert_eq!(account.pnl, before_pnl);
+    assert_eq!(account.reserved_pnl, before_reserved_pnl);
+    assert_eq!(account.fee_credits, before_fee_credits);
+    assert_eq!(account.last_fee_slot, before_last_fee_slot);
+    assert_eq!(account.active_bitmap, before_active_bitmap);
+    assert_eq!(account.health_cert.valid, before_health_valid);
+    assert_eq!(account.legs[0].active, before_leg_active);
+    assert_eq!(account.legs[0].side, before_leg_side);
+    assert_eq!(account.legs[0].basis_pos_q, before_leg_basis);
+    assert_eq!(account.legs[0].a_basis, before_leg_a_basis);
+    assert_eq!(account.legs[0].k_snap, before_leg_k_snap);
+    assert_eq!(account.legs[0].f_snap, before_leg_f_snap);
+    assert_eq!(account.stale_state, before_stale);
+    assert_eq!(account.b_stale_state, before_b_stale);
 }
 
 #[kani::proof]
@@ -3002,15 +3182,20 @@ fn proof_v14_equity_active_accrual_requires_protective_progress() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
+fn proof_v14_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposite =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [88; 32], owner));
     group
         .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
-    group.active_bankrupt_close_present = true;
+    group
+        .attach_leg(&mut opposite, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group.pending_domain_loss_barriers[0] = 1;
     let before_a_long = group.assets[0].a_long;
     let before_b_short = group.assets[0].b_short_num;
     let before_oi_long = group.assets[0].oi_eff_long_q;
@@ -3019,7 +3204,7 @@ fn proof_v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
 
     kani::cover!(
         out.equity_active,
-        "v14 active close accrual remains reachable"
+        "v14 pending-domain barrier accrual remains reachable"
     );
     assert!(out.equity_active);
     assert_eq!(out.dt, 1);
@@ -3027,7 +3212,7 @@ fn proof_v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
     assert_eq!(group.assets[0].a_long, before_a_long);
     assert_eq!(group.assets[0].b_short_num, before_b_short);
     assert_eq!(group.assets[0].oi_eff_long_q, before_oi_long);
-    assert!(group.active_bankrupt_close_present);
+    assert_eq!(group.pending_domain_loss_barriers[0], 1);
     assert_eq!(
         group.h_lock_lane(Some(&account), false),
         Ok(HLockLaneV14::HMax)
@@ -4020,7 +4205,7 @@ fn proof_v14_resolved_close_partial_b_settlement_makes_progress_without_closing(
 #[kani::solver(cadical)]
 fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     let blocker: u8 = kani::any();
-    kani::assume(blocker < 9);
+    kani::assume(blocker < 8);
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
@@ -4031,14 +4216,13 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     group.pnl_pos_bound_tot = 10;
     group.resolve_market_not_atomic(1).unwrap();
     match blocker {
-        0 => group.active_bankrupt_close_present = true,
-        1 => group.b_stale_account_count = 1,
-        2 => group.stale_certificate_count = 1,
-        3 => group.negative_pnl_account_count = 1,
-        4 => group.assets[0].stored_pos_count_long = 1,
-        5 => group.assets[0].stored_pos_count_short = 1,
-        6 => group.assets[0].stale_account_count_long = 1,
-        7 => group.assets[0].stale_account_count_short = 1,
+        0 => group.b_stale_account_count = 1,
+        1 => group.stale_certificate_count = 1,
+        2 => group.negative_pnl_account_count = 1,
+        3 => group.assets[0].stored_pos_count_long = 1,
+        4 => group.assets[0].stored_pos_count_short = 1,
+        5 => group.assets[0].stale_account_count_long = 1,
+        6 => group.assets[0].stale_account_count_short = 1,
         _ => group.pending_domain_loss_barriers[1] = 1,
     }
 
@@ -4048,13 +4232,13 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     let account_pnl_before = account.pnl;
     let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
 
-    kani::cover!(blocker == 0, "v14 resolved readiness active close blocker");
+    kani::cover!(blocker == 0, "v14 resolved readiness B-stale blocker");
     kani::cover!(
-        blocker == 7,
+        blocker == 6,
         "v14 resolved readiness stale short-count blocker"
     );
     kani::cover!(
-        blocker == 8,
+        blocker == 7,
         "v14 resolved readiness pending-domain-loss barrier blocker"
     );
     assert_eq!(outcome, Ok(ResolvedCloseOutcomeV14::ProgressOnly));

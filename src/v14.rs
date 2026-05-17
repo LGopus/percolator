@@ -834,7 +834,6 @@ pub struct MarketGroupV14 {
     pub assets: [AssetStateV14; V14_MAX_PORTFOLIO_ASSETS_N],
     pub bankruptcy_hlock_active: bool,
     pub threshold_stress_active: bool,
-    pub active_bankrupt_close_present: bool,
     pub loss_stale_active: bool,
     pub recovery_reason: Option<PermissionlessRecoveryReasonV14>,
     pub mode: MarketModeV14,
@@ -1657,7 +1656,6 @@ pub struct MarketGroupV14Account {
     pub assets: [AssetStateV14Account; V14_MAX_PORTFOLIO_ASSETS_N],
     pub bankruptcy_hlock_active: u8,
     pub threshold_stress_active: u8,
-    pub active_bankrupt_close_present: u8,
     pub loss_stale_active: u8,
     pub recovery_reason: V14OptionalRecoveryReasonAccount,
     pub mode: u8,
@@ -1710,7 +1708,6 @@ impl MarketGroupV14Account {
             assets,
             bankruptcy_hlock_active: encode_bool(value.bankruptcy_hlock_active),
             threshold_stress_active: encode_bool(value.threshold_stress_active),
-            active_bankrupt_close_present: encode_bool(value.active_bankrupt_close_present),
             loss_stale_active: encode_bool(value.loss_stale_active),
             recovery_reason: V14OptionalRecoveryReasonAccount::from_runtime(value.recovery_reason),
             mode: encode_market_mode(value.mode),
@@ -1763,7 +1760,6 @@ impl MarketGroupV14Account {
             assets,
             bankruptcy_hlock_active: decode_bool(self.bankruptcy_hlock_active)?,
             threshold_stress_active: decode_bool(self.threshold_stress_active)?,
-            active_bankrupt_close_present: decode_bool(self.active_bankrupt_close_present)?,
             loss_stale_active: decode_bool(self.loss_stale_active)?,
             recovery_reason: self.recovery_reason.try_to_runtime()?,
             mode: decode_market_mode(self.mode)?,
@@ -1810,7 +1806,6 @@ impl MarketGroupV14 {
             assets: [AssetStateV14::default(); V14_MAX_PORTFOLIO_ASSETS_N],
             bankruptcy_hlock_active: false,
             threshold_stress_active: false,
-            active_bankrupt_close_present: false,
             loss_stale_active: false,
             recovery_reason: None,
             mode: MarketModeV14::Live,
@@ -2436,7 +2431,6 @@ impl MarketGroupV14 {
             || self.mode == MarketModeV14::Recovery
             || instruction_bankruptcy_candidate
             || self.loss_stale_active
-            || self.active_bankrupt_close_present
         {
             return Ok(HLockLaneV14::HMax);
         }
@@ -3855,9 +3849,7 @@ impl MarketGroupV14 {
     }
 
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV14) -> V14Result<()> {
-        if self.active_bankrupt_close_present
-            || asset_index >= self.config.max_portfolio_assets as usize
-        {
+        if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V14Error::LockActive);
         }
         let asset = &mut self.assets[asset_index];
@@ -4590,8 +4582,7 @@ impl MarketGroupV14 {
     }
 
     fn resolved_positive_payout_ready(&self) -> bool {
-        if self.active_bankrupt_close_present
-            || self.b_stale_account_count != 0
+        if self.b_stale_account_count != 0
             || self.stale_certificate_count != 0
             || self.negative_pnl_account_count != 0
         {
