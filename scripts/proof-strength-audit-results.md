@@ -110,6 +110,8 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_public_invariants_reject_hard_global_bounds` | 8.5s | PASS |
 | `proof_v14_bankrupt_liquidation_consumes_insurance_before_social_loss` | 111s | PASS |
 | `proof_v14_domain_insurance_budget_caps_bankruptcy_spend` | 594s | PASS |
+| `proof_v14_long_liquidation_residual_charges_short_domain` | 126.45743s | PASS |
+| `proof_v14_short_liquidation_residual_charges_long_domain` | 126.074s | PASS |
 | `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` | 499s | PASS |
 | `proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once` | 536s | PASS |
 | `proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk` | 159s | PASS |
@@ -179,6 +181,9 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `B_booking_exact_remainder_conservation` | `v14_b_residual_booking_is_bounded_and_remainder_conserving`; `proof_v14_b_residual_booking_makes_durable_progress_or_fails_closed` |
 | `bankrupt_close_books_residual_without_opposing_scan` | bankrupt liquidation residual-durability tests/proofs; residual booking tests/proofs; no full-market scan crank proof |
 | `bankrupt_close_cannot_clear_basis_before_residual_durable` | `v14_bankrupt_liquidation_requires_residual_durable_before_freeing_exposure`; `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
+| `bad_asset_residual_charged_only_to_asset_side_domain` | `v14_liquidation_residual_domain_is_opposite_side_for_long_and_short`; `proof_v14_long_liquidation_residual_charges_short_domain`; `proof_v14_short_liquidation_residual_charges_long_domain` |
+| `liquidation_order_cannot_choose_residual_domain` | `v14_liquidation_residual_domain_is_opposite_side_for_long_and_short`; both liquidation residual proofs exercise production `liquidate_account_not_atomic` with caller-independent request fields and assert only the opposite-side domain is spent |
+| `portfolio_insurance_allocation_is_caller_independent` | Domain-budget liquidation tests/proofs; long/short residual-domain proofs show insurance spend is derived from bankrupt exposure side, not caller liquidation ordering |
 | `pending_domain_loss_barrier_blocks_weight_exit_until_residual_durable` | `v14_pending_domain_loss_barrier_blocks_other_participants_until_residual_done`; `v14_pending_domain_loss_barrier_blocks_trade_weight_escape_before_fee_or_position_mutation`; `v14_pending_domain_loss_barrier_blocks_rebalance_weight_escape_before_position_mutation`; `v14_pending_domain_loss_barrier_blocks_side_reset_before_residual_done`; `v14_pending_domain_loss_barrier_does_not_freeze_unrelated_positive_credit`; `proof_v14_pending_domain_barrier_blocks_participants_until_residual_finalized`; `proof_v14_pending_domain_barrier_blocks_trade_weight_escape_before_mutation`; `proof_v14_pending_domain_barrier_blocks_rebalance_weight_escape_before_mutation`; `proof_v14_pending_domain_barrier_blocks_side_reset_before_mutation`; `proof_v14_pending_domain_barrier_does_not_freeze_unrelated_positive_credit` |
 | `oi_positive_requires_loss_weight_or_recovery` | `v14_public_invariants_reject_oi_loss_weight_shape_mismatch`; `proof_v14_public_invariants_reject_hard_global_bounds`; attach/clear and quantity-ADL OI symmetry tests/proofs |
 | `live_oi_symmetric_in_live_mode` | `v14_public_invariants_reject_live_oi_imbalance`; `proof_v14_public_invariants_reject_hard_global_bounds`; trade, liquidation, rebalance, and quantity-ADL OI symmetry tests/proofs |

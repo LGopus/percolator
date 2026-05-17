@@ -4192,6 +4192,60 @@ fn v14_domain_insurance_budget_caps_bankruptcy_spend_for_one_asset_side() {
 }
 
 #[test]
+fn v14_liquidation_residual_domain_is_opposite_side_for_long_and_short() {
+    for bankrupt_side in [SideV14::Long, SideV14::Short] {
+        let (market, _, owner) = ids();
+        let mut g = group();
+        let mut bankrupt = account();
+        let mut opposing =
+            PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        g.vault = 4;
+        g.insurance = 4;
+        g.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+        let expected_domain = match bankrupt_side {
+            SideV14::Long => 1,
+            SideV14::Short => 0,
+        };
+        let unrelated_domain = match bankrupt_side {
+            SideV14::Long => 0,
+            SideV14::Short => 1,
+        };
+        g.insurance_domain_budget[expected_domain] = 3;
+        bankrupt.pnl = -5;
+        g.negative_pnl_account_count = 1;
+        match bankrupt_side {
+            SideV14::Long => {
+                g.attach_leg(&mut bankrupt, 0, SideV14::Long, 1).unwrap();
+                g.attach_leg(&mut opposing, 0, SideV14::Short, -1).unwrap();
+            }
+            SideV14::Short => {
+                g.attach_leg(&mut bankrupt, 0, SideV14::Short, -1).unwrap();
+                g.attach_leg(&mut opposing, 0, SideV14::Long, 1).unwrap();
+            }
+        }
+
+        let out = g
+            .liquidate_account_not_atomic(
+                &mut bankrupt,
+                LiquidationRequestV14 {
+                    asset_index: 0,
+                    close_q: 1,
+                    fee_bps: 0,
+                },
+                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            )
+            .unwrap();
+
+        assert_eq!(out.insurance_used, 3);
+        assert_eq!(out.residual_booked, 2);
+        assert_eq!(g.insurance_domain_spent[expected_domain], 3);
+        assert_eq!(g.insurance_domain_spent[unrelated_domain], 0);
+        assert_eq!(bankrupt.pnl, 0);
+        assert_eq!(bankrupt.active_bitmap, 0);
+    }
+}
+
+#[test]
 fn v14_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() {
     let (market, _, owner) = ids();
     let mut cfg = V14Config::public_user_fund(1, 0, 10);
