@@ -4641,6 +4641,35 @@ fn v15_resolved_payout_receipt_tracks_paid_effective_and_later_topup() {
 }
 
 #[test]
+fn v15_unfinalized_resolved_receipt_blocks_account_close_until_topup() {
+    let mut g = group();
+    let mut a = account();
+    g.create_portfolio_account(&a).unwrap();
+    g.vault = 1;
+    a.pnl = 1;
+    g.pnl_pos_tot = 1;
+    g.pnl_pos_bound_tot_num = BOUND_SCALE + 1;
+    g.pnl_pos_bound_tot = 2;
+    g.resolve_market_not_atomic(1).unwrap();
+
+    let first = g.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+
+    assert_eq!(first, ResolvedCloseOutcomeV15::Closed { payout: 0 });
+    assert!(a.resolved_payout_receipt.present);
+    assert!(!a.resolved_payout_receipt.finalized);
+    assert_eq!(g.close_portfolio_account(&a), Err(V15Error::LockActive));
+    assert_eq!(g.materialized_portfolio_count, 1);
+
+    g.refine_resolved_unreceipted_bound_not_atomic(1).unwrap();
+    let topup = g.claim_resolved_payout_topup_not_atomic(&mut a).unwrap();
+
+    assert_eq!(topup, 1);
+    assert!(a.resolved_payout_receipt.finalized);
+    assert_eq!(g.close_portfolio_account(&a), Ok(()));
+    assert_eq!(g.materialized_portfolio_count, 0);
+}
+
+#[test]
 fn v15_public_invariants_reject_scaled_junior_bound_cache_mismatch() {
     let mut g = group();
     g.pnl_pos_tot = 1;

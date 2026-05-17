@@ -4713,6 +4713,52 @@ fn proof_v15_resolved_receipt_tracks_paid_effective_and_bound_refinement_topup()
 }
 
 #[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v15_unfinalized_resolved_receipt_blocks_account_close_until_topup() {
+    let extra_num: u8 = kani::any();
+    kani::assume((1..=3).contains(&extra_num));
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.create_portfolio_account(&account).unwrap();
+    group.vault = 1;
+    account.pnl = 1;
+    group.pnl_pos_tot = 1;
+    group.pnl_pos_bound_tot_num = BOUND_SCALE + extra_num as u128;
+    group.pnl_pos_bound_tot = 2;
+    group.resolve_market_not_atomic(1).unwrap();
+
+    let first = group.close_resolved_account_not_atomic(&mut account, 0);
+
+    kani::cover!(
+        first == Ok(ResolvedCloseOutcomeV15::Closed { payout: 0 })
+            && account.resolved_payout_receipt.present
+            && !account.resolved_payout_receipt.finalized,
+        "v15 partial resolved receipt blocks account close before top-up"
+    );
+    assert_eq!(first, Ok(ResolvedCloseOutcomeV15::Closed { payout: 0 }));
+    assert!(account.resolved_payout_receipt.present);
+    assert!(!account.resolved_payout_receipt.finalized);
+    assert_eq!(
+        group.close_portfolio_account(&account),
+        Err(V15Error::LockActive)
+    );
+    assert_eq!(group.materialized_portfolio_count, 1);
+
+    group
+        .refine_resolved_unreceipted_bound_not_atomic(extra_num as u128)
+        .unwrap();
+    let topup = group.claim_resolved_payout_topup_not_atomic(&mut account);
+
+    assert_eq!(topup, Ok(1));
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(group.close_portfolio_account(&account), Ok(()));
+    assert_eq!(group.materialized_portfolio_count, 0);
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v15_public_invariants_reject_scaled_junior_bound_cache_mismatch() {

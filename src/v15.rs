@@ -2144,6 +2144,9 @@ impl MarketGroupV15 {
         if receipt.paid_effective > receipt.terminal_positive_claim_face {
             return Err(V15Error::InvalidLeg);
         }
+        if receipt.finalized != (receipt.paid_effective == receipt.terminal_positive_claim_face) {
+            return Err(V15Error::InvalidLeg);
+        }
         Ok(())
     }
 
@@ -2166,6 +2169,8 @@ impl MarketGroupV15 {
             || account.stale_state
             || account.b_stale_state
             || account.close_progress.active
+            || (account.resolved_payout_receipt.present
+                && !account.resolved_payout_receipt.finalized)
         {
             return Err(V15Error::LockActive);
         }

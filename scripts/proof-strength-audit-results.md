@@ -10,18 +10,18 @@ Static inventory from the current `v15` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 176 |
-| Kani proofs | 171 |
-| Kani cover checks | 264 |
-| Kani assumptions | 131 |
+| Rust spec/fuzz tests | 177 |
+| Kani proofs | 172 |
+| Kani cover checks | 265 |
+| Kani assumptions | 132 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v15_spec_tests.rs` | 175 | 0 | 0 |
+| `tests/v15_spec_tests.rs` | 176 | 0 | 0 |
 | `tests/v15_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v15.rs` | 0 | 164 | 256 |
+| `tests/proofs_v15.rs` | 0 | 165 | 257 |
 | `tests/proofs_v15_arithmetic.rs` | 0 | 7 | 8 |
 
 The v15 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v15_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 171 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 172 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -141,6 +141,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v15_flat_pending_obligation_cannot_clear_before_b_settlement` | 304.95313s | PASS |
 | `proof_v15_public_invariants_reject_multiple_pending_barriers_per_domain` | 1.4656148s | PASS |
 | `proof_v15_single_domain_close_lock_rejects_second_origin_until_first_finalized` | 24.928394s | PASS |
+| `proof_v15_unfinalized_resolved_receipt_blocks_account_close_until_topup` | 94.674194s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -248,7 +249,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `canonical_single_leg_per_asset_no_same_asset_double_support` | `v15_same_asset_duplicate_leg_cannot_double_count_support`; `proof_v15_same_asset_duplicate_leg_cannot_double_count_support`; production `attach_leg` duplicate guard |
 | `N_too_large_rejected_at_public_user_fund_init` / `cfg_max_bankrupt_close_lifetime_slots_positive` | `v15_public_init_rejects_unbounded_portfolio_width`; `v15_public_init_requires_crankforward_recovery_and_chunk_caps`; `proof_v15_configured_portfolio_width_rejects_out_of_range_leg`; public config proof |
 | `PNL_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay` | `v15_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay`; `proof_v15_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay`; resolved positive-payout bound-denominator test/proof |
-| `resolved_payout_readiness_uses_exact_counters_and_bounds` | `v15_resolved_payout_readiness_uses_exact_counters_and_bounds`; `v15_resolved_positive_payout_waits_for_pending_domain_loss_barrier`; `proof_v15_resolved_payout_readiness_uses_exact_counters_and_bounds`; existing resolved close partial-B/active-position/payout proofs |
+| `resolved_payout_readiness_uses_exact_counters_and_bounds` | `v15_resolved_payout_readiness_uses_exact_counters_and_bounds`; `v15_resolved_positive_payout_waits_for_pending_domain_loss_barrier`; `v15_unfinalized_resolved_receipt_blocks_account_close_until_topup`; `proof_v15_resolved_payout_readiness_uses_exact_counters_and_bounds`; `proof_v15_unfinalized_resolved_receipt_blocks_account_close_until_topup`; existing resolved close partial-B/active-position/payout proofs |
 
 No missing engine-side spec §16 coverage item was identified in this pass.
 
@@ -299,9 +300,9 @@ Strength indicators:
 
 | Check | Result |
 |---|---:|
-| Harnesses over v15 production engine/wire methods | 164 |
+| Harnesses over v15 production engine/wire methods | 165 |
 | Harnesses over shared production arithmetic helpers | 7 |
-| Harnesses with `kani::cover!` reachability checks | 139 |
+| Harnesses with `kani::cover!` reachability checks | 140 |
 | Explicit `kani::assume(false)` / `assume(false)` findings | 0 |
 | Confirmed vacuous harnesses | 0 |
 | Confirmed weak harnesses | 0 |
@@ -332,5 +333,5 @@ property families have been reviewed and either ported to v15 production-code
 tests/proofs or retired as slab/wrapper/v12-queue-specific.
 
 The only open audit-maintenance item is to rerun `scripts/run_kani_full_audit.sh`
-against the current 171-proof inventory and replace the older 57-proof timing
+against the current 172-proof inventory and replace the older 57-proof timing
 artifacts.
