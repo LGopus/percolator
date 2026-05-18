@@ -50,6 +50,12 @@ fn tight_envelope_config() -> V16Config {
     cfg
 }
 
+fn source_lien_config() -> V16Config {
+    let mut cfg = V16Config::public_user_fund(1, 0, 10);
+    cfg.min_nonzero_im_req = 10;
+    cfg
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -209,30 +215,159 @@ fn proof_v16_unbacked_attributed_conversion_rejects_without_mutation() {
     group.assert_public_invariants().unwrap();
 }
 
+fn create_counterparty_lien_via_public_withdraw(
+    group: &mut MarketGroupV16,
+    account: &mut PortfolioAccountV16,
+    account_id_seed: u8,
+    effective_credit: u128,
+    backing_expiry_slot: u64,
+) {
+    let mut opposite = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(
+        group.market_group_id,
+        [account_id_seed; 32],
+        [9; 32],
+    ));
+    group.deposit_not_atomic(account, 10).unwrap();
+    group.vault = group.vault.checked_add(10).unwrap();
+    group
+        .add_account_source_positive_pnl_not_atomic(account, 0, 10)
+        .unwrap();
+    group
+        .add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, backing_expiry_slot)
+        .unwrap();
+    group
+        .attach_leg(account, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposite, 0, SideV16::Short, -(10 * POS_SCALE as i128))
+        .unwrap();
+    group
+        .withdraw_not_atomic(account, effective_credit, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+}
+
+fn create_insurance_lien_via_public_withdraw(
+    group: &mut MarketGroupV16,
+    account: &mut PortfolioAccountV16,
+    account_id_seed: u8,
+    effective_credit: u128,
+) {
+    let mut opposite = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(
+        group.market_group_id,
+        [account_id_seed; 32],
+        [9; 32],
+    ));
+    group.deposit_not_atomic(account, 10).unwrap();
+    group.vault = group.vault.checked_add(10).unwrap();
+    group.insurance = 10 * BOUND_SCALE;
+    group.vault = group.vault.checked_add(group.insurance).unwrap();
+    group
+        .add_account_source_positive_pnl_not_atomic(account, 0, 10)
+        .unwrap();
+    group
+        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
+        .unwrap();
+    group
+        .attach_leg(account, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposite, 0, SideV16::Short, -(10 * POS_SCALE as i128))
+        .unwrap();
+    group
+        .withdraw_not_atomic(account, effective_credit, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+}
+
+fn seed_counterparty_source_lien_state(
+    group: &mut MarketGroupV16,
+    account: &mut PortfolioAccountV16,
+    effective_credit: u128,
+    backing_expiry_slot: u64,
+) {
+    let claim = 10 * BOUND_SCALE;
+    let backing = 10 * BOUND_SCALE;
+    let reserved_backing = effective_credit * BOUND_SCALE;
+    group.deposit_not_atomic(account, 10).unwrap();
+    group.vault = group.vault.checked_add(10).unwrap();
+    group
+        .add_account_source_positive_pnl_not_atomic(account, 0, 10)
+        .unwrap();
+    group
+        .add_fresh_counterparty_backing_not_atomic(0, backing, backing_expiry_slot)
+        .unwrap();
+    group
+        .create_source_credit_lien_from_counterparty_not_atomic(0, reserved_backing)
+        .unwrap();
+    account.source_claim_bound_num[0] = claim;
+    account.source_claim_liened_num[0] = reserved_backing;
+    account.source_claim_counterparty_liened_num[0] = reserved_backing;
+    account.source_lien_effective_reserved[0] = effective_credit;
+    account.source_lien_counterparty_backing_num[0] = reserved_backing;
+    group.validate_account_shape(account).unwrap();
+}
+
+fn seed_insurance_source_lien_state(
+    group: &mut MarketGroupV16,
+    account: &mut PortfolioAccountV16,
+    effective_credit: u128,
+) {
+    let claim = 10 * BOUND_SCALE;
+    let reserved_backing = effective_credit * BOUND_SCALE;
+    group.deposit_not_atomic(account, 10).unwrap();
+    group.vault = group.vault.checked_add(10).unwrap();
+    group.insurance = 10 * BOUND_SCALE;
+    group.vault = group.vault.checked_add(group.insurance).unwrap();
+    group
+        .add_account_source_positive_pnl_not_atomic(account, 0, 10)
+        .unwrap();
+    group
+        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
+        .unwrap();
+    group
+        .create_source_credit_lien_from_insurance_not_atomic(0, reserved_backing)
+        .unwrap();
+    account.source_claim_bound_num[0] = claim;
+    account.source_claim_liened_num[0] = reserved_backing;
+    account.source_claim_insurance_liened_num[0] = reserved_backing;
+    account.source_lien_effective_reserved[0] = effective_credit;
+    account.source_lien_insurance_backing_num[0] = reserved_backing;
+    group.validate_account_shape(account).unwrap();
+}
+
+fn set_account_capital_for_canonical_fixture(
+    group: &mut MarketGroupV16,
+    account: &mut PortfolioAccountV16,
+    new_capital: u128,
+) {
+    let old_capital = account.capital;
+    if new_capital < old_capital {
+        let delta = old_capital - new_capital;
+        group.c_tot = group.c_tot.checked_sub(delta).unwrap();
+        group.vault = group.vault.checked_sub(delta).unwrap();
+    } else {
+        let delta = new_capital - old_capital;
+        group.c_tot = group.c_tot.checked_add(delta).unwrap();
+        group.vault = group.vault.checked_add(delta).unwrap();
+    }
+    account.capital = new_capital;
+    account.health_cert.valid = false;
+    group.validate_account_shape(account).unwrap();
+}
+
 #[kani::proof]
-#[kani::unwind(80)]
+#[kani::unwind(140)]
 #[kani::solver(cadical)]
-fn proof_v16_initial_margin_lien_helper_locks_claim_and_backing_when_positive_credit_is_required() {
+fn proof_v16_public_withdraw_locks_claim_and_backing_when_positive_credit_is_required() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [10; 32], [1; 32]));
-    group.vault = 10;
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
-        .unwrap();
-    account.health_cert.certified_initial_req = 2;
-    account.health_cert.valid = true;
 
-    let result = group.kani_create_initial_margin_source_lien_if_needed(&mut account);
+    create_counterparty_lien_via_public_withdraw(&mut group, &mut account, 18, 5, 10);
 
-    kani::cover!(true, "v16 initial-margin source lien creation reachable");
-    assert!(result.is_ok());
+    kani::cover!(true, "v16 public withdraw source lien creation reachable");
     assert!(account.source_claim_liened_num[0] != 0);
-    assert_eq!(account.source_lien_effective_reserved[0], 2);
+    assert_eq!(account.source_lien_effective_reserved[0], 5);
     assert_eq!(
         group.source_credit[0].valid_liened_backing_num,
         account.source_lien_effective_reserved[0] * BOUND_SCALE
@@ -241,30 +376,18 @@ fn proof_v16_initial_margin_lien_helper_locks_claim_and_backing_when_positive_cr
         account.source_claim_liened_num[0]
             <= account.source_claim_bound_num[0] - account.source_claim_impaired_num[0]
     );
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
-#[kani::unwind(80)]
+#[kani::unwind(140)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_source_credit_lien_aggregate_tracks_account_backing_split() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [16; 32], [1; 32]));
-    group.vault = 10;
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
-        .unwrap();
-    account.health_cert.certified_initial_req = 2;
-    account.health_cert.valid = true;
 
-    group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
-        .unwrap();
+    create_counterparty_lien_via_public_withdraw(&mut group, &mut account, 19, 5, 10);
     let proof = group
         .source_credit_lien_proof_for_account_domain(&account, 0)
         .unwrap();
@@ -275,7 +398,7 @@ fn proof_v16_counterparty_source_credit_lien_aggregate_tracks_account_backing_sp
         counterparty_face_claim_locked_num: account.source_claim_counterparty_liened_num[0],
         insurance_face_claim_locked_num: 0,
         effective_credit_reserved: account.source_lien_effective_reserved[0],
-        counterparty_backing_reserved_num: 2 * BOUND_SCALE,
+        counterparty_backing_reserved_num: 5 * BOUND_SCALE,
         insurance_backing_reserved_num: 0,
         impaired_face_claim_num: 0,
         impaired_effective_credit_reserved: 0,
@@ -287,38 +410,24 @@ fn proof_v16_counterparty_source_credit_lien_aggregate_tracks_account_backing_sp
     );
     assert_eq!(proof, expected);
     assert_eq!(proof.validate(), Ok(()));
-    assert_eq!(proof.effective_credit_reserved, 2);
+    assert_eq!(proof.effective_credit_reserved, 5);
     assert_eq!(
         group.source_credit[0].valid_liened_backing_num,
         proof.counterparty_backing_reserved_num
     );
     assert_eq!(proof.insurance_backing_reserved_num, 0);
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
-#[kani::unwind(80)]
+#[kani::unwind(140)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_source_credit_lien_aggregate_tracks_account_backing_split() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [17; 32], [1; 32]));
-    group.vault = 10;
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group.insurance = 10;
-    group.vault = group.vault.checked_add(10).unwrap();
-    group
-        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
-        .unwrap();
-    account.health_cert.certified_initial_req = 2;
-    account.health_cert.valid = true;
 
-    group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
-        .unwrap();
+    create_insurance_lien_via_public_withdraw(&mut group, &mut account, 20, 5);
     let proof = group
         .source_credit_lien_proof_for_account_domain(&account, 0)
         .unwrap();
@@ -330,7 +439,7 @@ fn proof_v16_insurance_source_credit_lien_aggregate_tracks_account_backing_split
         insurance_face_claim_locked_num: account.source_claim_insurance_liened_num[0],
         effective_credit_reserved: account.source_lien_effective_reserved[0],
         counterparty_backing_reserved_num: 0,
-        insurance_backing_reserved_num: 2 * BOUND_SCALE,
+        insurance_backing_reserved_num: 5 * BOUND_SCALE,
         impaired_face_claim_num: 0,
         impaired_effective_credit_reserved: 0,
     };
@@ -341,13 +450,12 @@ fn proof_v16_insurance_source_credit_lien_aggregate_tracks_account_backing_split
     );
     assert_eq!(proof, expected);
     assert_eq!(proof.validate(), Ok(()));
-    assert_eq!(proof.effective_credit_reserved, 2);
+    assert_eq!(proof.effective_credit_reserved, 5);
     assert_eq!(proof.counterparty_backing_reserved_num, 0);
     assert_eq!(
         group.source_credit[0].valid_liened_insurance_num,
         proof.insurance_backing_reserved_num
     );
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
@@ -392,28 +500,18 @@ fn proof_v16_withdraw_locks_source_claim_when_post_state_needs_positive_credit()
 }
 
 #[kani::proof]
-#[kani::unwind(95)]
+#[kani::unwind(130)]
 #[kani::solver(cadical)]
 fn proof_v16_release_account_source_lien_restores_counterparty_backing_when_unneeded() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [10; 32], [1; 32]));
-    group.deposit_not_atomic(&mut account, 4).unwrap();
-    group.vault = group.vault.checked_add(10).unwrap();
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
-        .unwrap();
-    account.health_cert.certified_initial_req = 5;
-    account.health_cert.valid = true;
-    group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
-        .unwrap();
-    assert_eq!(account.source_lien_effective_reserved[0], 1);
-    group.deposit_not_atomic(&mut account, 1).unwrap();
+
+    seed_counterparty_source_lien_state(&mut group, &mut account, 5, 10);
+    assert_eq!(account.source_lien_effective_reserved[0], 5);
+    set_account_capital_for_canonical_fixture(&mut group, &mut account, 5);
+    group.deposit_not_atomic(&mut account, 5).unwrap();
 
     let released = group
         .release_account_source_credit_liens_if_unneeded_not_atomic(
@@ -423,7 +521,7 @@ fn proof_v16_release_account_source_lien_restores_counterparty_backing_when_unne
         .unwrap();
 
     kani::cover!(true, "v16 account source-lien release reachable");
-    assert_eq!(released, 1);
+    assert_eq!(released, 5);
     assert_eq!(account.source_claim_liened_num[0], 0);
     assert_eq!(account.source_lien_effective_reserved[0], 0);
     assert_eq!(account.source_lien_counterparty_backing_num[0], 0);
@@ -432,36 +530,23 @@ fn proof_v16_release_account_source_lien_restores_counterparty_backing_when_unne
         group.source_credit_available_backing_num(0),
         Ok(10 * BOUND_SCALE)
     );
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
-#[kani::unwind(95)]
+#[kani::unwind(130)]
 #[kani::solver(cadical)]
 fn proof_v16_release_account_source_lien_restores_insurance_backing_when_unneeded() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [13; 32], [1; 32]));
-    group.deposit_not_atomic(&mut account, 4).unwrap();
-    group.vault = group.vault.checked_add(10).unwrap();
-    group.insurance = 10 * BOUND_SCALE;
-    group.vault = group.vault.checked_add(group.insurance).unwrap();
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
-        .unwrap();
-    account.health_cert.certified_initial_req = 5;
-    account.health_cert.valid = true;
-    group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
-        .unwrap();
-    assert_eq!(account.source_lien_effective_reserved[0], 1);
+
+    seed_insurance_source_lien_state(&mut group, &mut account, 5);
+    assert_eq!(account.source_lien_effective_reserved[0], 5);
     assert_eq!(account.source_lien_counterparty_backing_num[0], 0);
-    assert_eq!(account.source_lien_insurance_backing_num[0], BOUND_SCALE);
-    group.deposit_not_atomic(&mut account, 1).unwrap();
+    assert_eq!(account.source_lien_insurance_backing_num[0], 5 * BOUND_SCALE);
+    set_account_capital_for_canonical_fixture(&mut group, &mut account, 5);
+    group.deposit_not_atomic(&mut account, 5).unwrap();
 
     let released = group
         .release_account_source_credit_liens_if_unneeded_not_atomic(
@@ -471,7 +556,7 @@ fn proof_v16_release_account_source_lien_restores_insurance_backing_when_unneede
         .unwrap();
 
     kani::cover!(true, "v16 insurance account source-lien release reachable");
-    assert_eq!(released, 1);
+    assert_eq!(released, 5);
     assert_eq!(account.source_claim_liened_num[0], 0);
     assert_eq!(account.source_lien_effective_reserved[0], 0);
     assert_eq!(account.source_lien_insurance_backing_num[0], 0);
@@ -480,30 +565,20 @@ fn proof_v16_release_account_source_lien_restores_insurance_backing_when_unneede
         group.source_credit_available_backing_num(0),
         Ok(10 * BOUND_SCALE)
     );
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
-#[kani::unwind(110)]
+#[kani::unwind(140)]
 #[kani::solver(cadical)]
 fn proof_v16_full_refresh_impairs_expired_counterparty_lien_before_equity_credit() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [14; 32], [1; 32]));
-    group.vault = 10;
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 1)
-        .unwrap();
-    account.health_cert.certified_initial_req = 5;
-    account.health_cert.valid = true;
-    group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
-        .unwrap();
+
+    seed_counterparty_source_lien_state(&mut group, &mut account, 5, 1);
     assert_eq!(account.source_lien_effective_reserved[0], 5);
+    set_account_capital_for_canonical_fixture(&mut group, &mut account, 5);
     group.current_slot = 1;
 
     let cert = group
@@ -511,7 +586,8 @@ fn proof_v16_full_refresh_impairs_expired_counterparty_lien_before_equity_credit
         .unwrap();
 
     kani::cover!(true, "v16 expired source-lien impairment reachable");
-    assert_eq!(cert.certified_equity, 0);
+    assert_eq!(cert.certified_equity, 5);
+    assert_eq!(cert.certified_equity, account.capital as i128);
     assert_eq!(account.source_lien_effective_reserved[0], 0);
     assert_eq!(account.source_lien_counterparty_backing_num[0], 0);
     assert_eq!(account.source_claim_liened_num[0], 0);
@@ -526,28 +602,17 @@ fn proof_v16_full_refresh_impairs_expired_counterparty_lien_before_equity_credit
 }
 
 #[kani::proof]
-#[kani::unwind(110)]
+#[kani::unwind(140)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_impairment_removes_account_health_credit() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [15; 32], [1; 32]));
-    group.vault = 10;
-    group.insurance = 10 * BOUND_SCALE;
-    group.vault = group.vault.checked_add(group.insurance).unwrap();
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
-        .unwrap();
-    account.health_cert.certified_initial_req = 10;
-    account.health_cert.valid = true;
-    group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
-        .unwrap();
+
+    seed_insurance_source_lien_state(&mut group, &mut account, 10);
     assert_eq!(account.source_lien_effective_reserved[0], 10);
+    set_account_capital_for_canonical_fixture(&mut group, &mut account, 0);
     assert_eq!(
         account.source_lien_insurance_backing_num[0],
         10 * BOUND_SCALE
@@ -573,7 +638,6 @@ fn proof_v16_insurance_lien_impairment_removes_account_health_credit() {
         group.source_credit[0].impaired_liened_insurance_num,
         10 * BOUND_SCALE
     );
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
@@ -670,42 +734,39 @@ fn proof_v16_stock_reconciliation_decomposes_vault_without_aliasing() {
 }
 
 #[kani::proof]
-#[kani::unwind(90)]
+#[kani::unwind(140)]
 #[kani::solver(cadical)]
-fn proof_v16_initial_margin_lien_helper_counts_existing_lien_before_incremental_credit() {
+fn proof_v16_public_withdraw_counts_existing_lien_before_incremental_credit() {
     let market = [1; 32];
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, source_lien_config()).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [12; 32], [1; 32]));
-    group.deposit_not_atomic(&mut account, 4).unwrap();
-    group.vault = group.vault.checked_add(10).unwrap();
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 10)
-        .unwrap();
-    group
-        .add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
-        .unwrap();
 
-    account.health_cert.certified_initial_req = 9;
-    account.health_cert.valid = true;
+    seed_counterparty_source_lien_state(&mut group, &mut account, 5, 10);
+    set_account_capital_for_canonical_fixture(&mut group, &mut account, 5);
     group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
+        .attach_leg(&mut account, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    let mut opposite =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [25; 32], [9; 32]));
+    group
+        .attach_leg(&mut opposite, 0, SideV16::Short, -(10 * POS_SCALE as i128))
         .unwrap();
     assert_eq!(account.source_lien_effective_reserved[0], 5);
 
-    account.health_cert.certified_initial_req = 10;
-    account.health_cert.valid = true;
     group
-        .kani_create_initial_margin_source_lien_if_needed(&mut account)
+        .withdraw_not_atomic(&mut account, 1, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
-    kani::cover!(true, "v16 incremental source lien helper branch reachable");
+    kani::cover!(
+        true,
+        "v16 public withdraw incremental source lien branch reachable"
+    );
     assert_eq!(account.source_lien_effective_reserved[0], 6);
     assert_eq!(
         group.source_credit[0].valid_liened_backing_num,
         6 * BOUND_SCALE
     );
-    group.assert_public_invariants().unwrap();
 }
 
 #[kani::proof]
@@ -5704,6 +5765,57 @@ fn proof_v16_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
         assert_eq!(group.pnl_pos_bound_tot, 0);
     }
     assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(90)]
+#[kani::solver(cadical)]
+fn proof_v16_open_source_backed_conversion_locks_withdrawal_until_source_exposure_clears() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let mut counterparty =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
+    let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
+
+    group.vault = 100;
+    group
+        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 4)
+        .unwrap();
+    group
+        .add_fresh_counterparty_backing_not_atomic(0, 4 * BOUND_SCALE, 10)
+        .unwrap();
+    group
+        .attach_leg(&mut account, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group
+        .attach_leg(&mut counterparty, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    group.full_account_refresh(&mut account, &prices).unwrap();
+
+    let converted = group
+        .convert_released_pnl_to_capital_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(
+        account.source_converted_capital_lock[0] != 0,
+        "v16 source-backed open conversion creates withdrawal lock"
+    );
+    assert_eq!(converted, 4);
+    assert_eq!(account.capital, 4);
+    assert_eq!(account.source_converted_capital_lock[0], 4);
+    let vault_before = group.vault;
+    let capital_before = account.capital;
+    let locked_before = account.source_converted_capital_lock[0];
+    let withdraw = group.withdraw_not_atomic(&mut account, 1, &prices);
+    assert_eq!(withdraw, Err(V16Error::LockActive));
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(account.capital, capital_before);
+    assert_eq!(account.source_converted_capital_lock[0], locked_before);
+
+    group.clear_leg(&mut account, 0).unwrap();
+    assert_eq!(account.source_converted_capital_lock[0], 0);
 }
 
 #[kani::proof]

@@ -995,6 +995,7 @@ pub struct PortfolioAccountV16 {
     pub source_lien_insurance_backing_num: [u128; V16_DOMAIN_COUNT],
     pub source_claim_impaired_num: [u128; V16_DOMAIN_COUNT],
     pub source_lien_impaired_effective_reserved: [u128; V16_DOMAIN_COUNT],
+    pub source_converted_capital_lock: [u128; V16_DOMAIN_COUNT],
     pub fee_credits: i128,
     pub cancel_deposit_escrow: u128,
     pub last_fee_slot: u64,
@@ -1026,6 +1027,7 @@ impl PortfolioAccountV16 {
             source_lien_insurance_backing_num: [0; V16_DOMAIN_COUNT],
             source_claim_impaired_num: [0; V16_DOMAIN_COUNT],
             source_lien_impaired_effective_reserved: [0; V16_DOMAIN_COUNT],
+            source_converted_capital_lock: [0; V16_DOMAIN_COUNT],
             fee_credits: 0,
             cancel_deposit_escrow: 0,
             last_fee_slot: 0,
@@ -1558,6 +1560,7 @@ struct SourceCreditConsumptionV16 {
     face_burn: u128,
     counterparty_credit_consumed: u128,
     insurance_credit_consumed: u128,
+    domain_effective_consumed: [u128; V16_DOMAIN_COUNT],
 }
 
 #[repr(C)]
@@ -2456,6 +2459,7 @@ pub struct PortfolioAccountV16Account {
     pub source_lien_insurance_backing_num: [V16PodU128; V16_DOMAIN_COUNT],
     pub source_claim_impaired_num: [V16PodU128; V16_DOMAIN_COUNT],
     pub source_lien_impaired_effective_reserved: [V16PodU128; V16_DOMAIN_COUNT],
+    pub source_converted_capital_lock: [V16PodU128; V16_DOMAIN_COUNT],
     pub fee_credits: V16PodI128,
     pub cancel_deposit_escrow: V16PodU128,
     pub last_fee_slot: V16PodU64,
@@ -2513,6 +2517,9 @@ impl PortfolioAccountV16Account {
             source_lien_impaired_effective_reserved: value
                 .source_lien_impaired_effective_reserved
                 .map(V16PodU128::new),
+            source_converted_capital_lock: value
+                .source_converted_capital_lock
+                .map(V16PodU128::new),
             fee_credits: V16PodI128::new(value.fee_credits),
             cancel_deposit_escrow: V16PodU128::new(value.cancel_deposit_escrow),
             last_fee_slot: V16PodU64::new(value.last_fee_slot),
@@ -2563,6 +2570,7 @@ impl PortfolioAccountV16Account {
             source_lien_impaired_effective_reserved: self
                 .source_lien_impaired_effective_reserved
                 .map(|v| v.get()),
+            source_converted_capital_lock: self.source_converted_capital_lock.map(|v| v.get()),
             fee_credits: self.fee_credits.get(),
             cancel_deposit_escrow: self.cancel_deposit_escrow.get(),
             last_fee_slot: self.last_fee_slot.get(),
@@ -2584,8 +2592,12 @@ impl PortfolioAccountV16Account {
         if out.reserved_pnl > out.pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
+        let mut converted_lock_sum = 0u128;
         let mut d = 0;
         while d < V16_DOMAIN_COUNT {
+            converted_lock_sum = converted_lock_sum
+                .checked_add(out.source_converted_capital_lock[d])
+                .ok_or(V16Error::ArithmeticOverflow)?;
             let locked = out.source_claim_liened_num[d]
                 .checked_add(out.source_claim_impaired_num[d])
                 .ok_or(V16Error::ArithmeticOverflow)?;
@@ -2618,6 +2630,9 @@ impl PortfolioAccountV16Account {
                 return Err(V16Error::InvalidLeg);
             }
             d += 1;
+        }
+        if converted_lock_sum > out.capital {
+            return Err(V16Error::InvalidLeg);
         }
         let source_claim_sum_num = MarketGroupV16::account_source_claim_bound_sum_num_static(&out)?;
         if source_claim_sum_num != 0 {
@@ -2951,6 +2966,7 @@ impl MarketGroupV16 {
             return Err(V16Error::InvalidLeg);
         }
         self.validate_account_source_credit_shape(account)?;
+        self.validate_source_converted_capital_locks(account)?;
         let source_claim_sum_num = Self::account_source_claim_bound_sum_num_static(account)?;
         if source_claim_sum_num != 0 {
             let required = Self::bound_num_from_amount(account.pnl.max(0) as u128)?;
@@ -3093,6 +3109,76 @@ impl MarketGroupV16 {
         Ok(())
     }
 
+    fn validate_source_converted_capital_locks(
+        &self,
+        account: &PortfolioAccountV16,
+    ) -> V16Result<()> {
+        let mut locked = 0u128;
+        let mut d = 0;
+        while d < V16_DOMAIN_COUNT {
+            let amount = account.source_converted_capital_lock[d];
+            if amount != 0 {
+                if !self.account_has_active_exposure_for_source_domain(account, d)? {
+                    return Err(V16Error::InvalidLeg);
+                }
+                locked = locked
+                    .checked_add(amount)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
+            d += 1;
+        }
+        if locked > account.capital {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(())
+    }
+
+    fn source_converted_capital_lock_sum(account: &PortfolioAccountV16) -> V16Result<u128> {
+        let mut total = 0u128;
+        let mut d = 0;
+        while d < V16_DOMAIN_COUNT {
+            total = total
+                .checked_add(account.source_converted_capital_lock[d])
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        Ok(total)
+    }
+
+    fn release_inactive_source_converted_capital_locks(
+        &self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        let mut d = 0;
+        while d < V16_DOMAIN_COUNT {
+            if account.source_converted_capital_lock[d] != 0
+                && !self.account_has_active_exposure_for_source_domain(account, d)?
+            {
+                account.source_converted_capital_lock[d] = 0;
+            }
+            d += 1;
+        }
+        Ok(())
+    }
+
+    fn lock_source_converted_capital_for_open_exposure(
+        &self,
+        account: &mut PortfolioAccountV16,
+        consumption: SourceCreditConsumptionV16,
+    ) -> V16Result<()> {
+        let mut d = 0;
+        while d < V16_DOMAIN_COUNT {
+            let amount = consumption.domain_effective_consumed[d];
+            if amount != 0 && self.account_has_active_exposure_for_source_domain(account, d)? {
+                account.source_converted_capital_lock[d] = account.source_converted_capital_lock[d]
+                    .checked_add(amount)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
+            d += 1;
+        }
+        self.validate_source_converted_capital_locks(account)
+    }
+
     pub fn source_credit_lien_proof_for_account_domain(
         &self,
         account: &PortfolioAccountV16,
@@ -3129,6 +3215,7 @@ impl MarketGroupV16 {
             || account.b_stale_state
             || account.close_progress.active
             || Self::account_source_claim_bound_sum_num_static(account)? != 0
+            || Self::source_converted_capital_lock_sum(account)? != 0
             || (account.resolved_payout_receipt.present
                 && !account.resolved_payout_receipt.finalized)
         {
@@ -3403,6 +3490,7 @@ impl MarketGroupV16 {
                 )?,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
+                domain_effective_consumed: [0; V16_DOMAIN_COUNT],
             }
         };
         let face_i128 =
@@ -3416,6 +3504,7 @@ impl MarketGroupV16 {
             .capital
             .checked_add(converted)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        self.lock_source_converted_capital_for_open_exposure(account, consumption)?;
         self.c_tot = self
             .c_tot
             .checked_add(converted)
@@ -3455,6 +3544,7 @@ impl MarketGroupV16 {
         }
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
+        self.release_inactive_source_converted_capital_locks(account)?;
         let locked = self.h_lock_lane(Some(account), false)? == HLockLaneV16::HMax;
         if self.loss_stale_active && account.active_bitmap != 0 {
             return Err(V16Error::LockActive);
@@ -3463,7 +3553,12 @@ impl MarketGroupV16 {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal(account)?;
-        if account.pnl < 0 || amount > account.capital {
+        let source_locked_capital = Self::source_converted_capital_lock_sum(account)?;
+        let withdrawable_capital = account
+            .capital
+            .checked_sub(source_locked_capital)
+            .ok_or(V16Error::InvalidLeg)?;
+        if account.pnl < 0 || amount > withdrawable_capital {
             return Err(V16Error::LockActive);
         }
         let post_capital = account.capital - amount;
@@ -3981,6 +4076,7 @@ impl MarketGroupV16 {
         }
         account.legs[asset_index] = PortfolioLegV16::EMPTY;
         account.active_bitmap &= !(1u32 << asset_index);
+        self.release_inactive_source_converted_capital_locks(account)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -4539,7 +4635,7 @@ impl MarketGroupV16 {
         if account.health_cert.certified_liq_deficit == 0 {
             return Err(V16Error::NonProgress);
         }
-        let before = *account;
+        let before_score = self.risk_score(account)?;
         let leg = account.legs[request.asset_index];
         if !leg.active {
             return Err(V16Error::InvalidLeg);
@@ -4633,7 +4729,7 @@ impl MarketGroupV16 {
         }
         self.reduce_position(account, request.asset_index, close_q)?;
         self.full_account_refresh(account, effective_prices)?;
-        self.validate_liquidation_progress(&before, account)?;
+        self.validate_liquidation_progress_from_score(before_score, account)?;
         self.assert_public_invariants()?;
         Ok(LiquidationOutcomeV16 {
             closed_q: close_q,
@@ -4788,7 +4884,7 @@ impl MarketGroupV16 {
         self.require_asset_live_reducible(request.asset_index)?;
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
-        let before = *account;
+        let before_score = self.risk_score(account)?;
         let leg = account.legs[request.asset_index];
         if !leg.active {
             return Err(V16Error::InvalidLeg);
@@ -4814,7 +4910,7 @@ impl MarketGroupV16 {
         self.reduce_position(account, request.asset_index, reduce_q)?;
         self.settle_negative_pnl_from_principal(account)?;
         self.full_account_refresh(account, effective_prices)?;
-        self.validate_liquidation_progress(&before, account)?;
+        self.validate_liquidation_progress_from_score(before_score, account)?;
         self.assert_public_invariants()?;
         Ok(RebalanceOutcomeV16 {
             reduced_q: reduce_q,
@@ -5665,7 +5761,15 @@ impl MarketGroupV16 {
         before: &PortfolioAccountV16,
         after: &PortfolioAccountV16,
     ) -> V16Result<()> {
-        let before_score = self.risk_score(before)?;
+        self.validate_liquidation_progress_from_score(self.risk_score(before)?, after)
+    }
+
+    #[inline(never)]
+    fn validate_liquidation_progress_from_score(
+        &self,
+        before_score: RiskScoreV16,
+        after: &PortfolioAccountV16,
+    ) -> V16Result<()> {
         let after_score = self.risk_score(after)?;
         if after_score.strictly_reduces_from(before_score)
             || after_score.certified_liq_deficit < before_score.certified_liq_deficit
@@ -6476,14 +6580,6 @@ impl MarketGroupV16 {
         )
     }
 
-    #[cfg(kani)]
-    pub fn kani_create_initial_margin_source_lien_if_needed(
-        &mut self,
-        account: &mut PortfolioAccountV16,
-    ) -> V16Result<()> {
-        self.create_initial_margin_source_lien_if_needed(account)
-    }
-
     fn create_and_consume_account_source_credit_for_effective_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
@@ -6495,12 +6591,14 @@ impl MarketGroupV16 {
                 face_burn: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
+                domain_effective_consumed: [0; V16_DOMAIN_COUNT],
             });
         }
         let mut remaining = effective_credit;
         let mut face_burn_num = 0u128;
         let mut counterparty_credit_consumed = 0u128;
         let mut insurance_credit_consumed = 0u128;
+        let mut domain_effective_consumed = [0u128; V16_DOMAIN_COUNT];
         let mut d = 0;
         while d < V16_DOMAIN_COUNT && remaining != 0 {
             if d >= self.config.max_portfolio_assets as usize * 2 {
@@ -6557,6 +6655,9 @@ impl MarketGroupV16 {
                     face_burn_num = face_burn_num
                         .checked_add(face_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
+                    domain_effective_consumed[d] = domain_effective_consumed[d]
+                        .checked_add(take)
+                        .ok_or(V16Error::ArithmeticOverflow)?;
                     remaining -= take;
                 }
             }
@@ -6569,6 +6670,7 @@ impl MarketGroupV16 {
             face_burn: Self::amount_from_bound_num(face_burn_num)?,
             counterparty_credit_consumed,
             insurance_credit_consumed,
+            domain_effective_consumed,
         })
     }
 
@@ -7221,6 +7323,7 @@ impl MarketGroupV16 {
                 face_burn: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
+                domain_effective_consumed: [0; V16_DOMAIN_COUNT],
             });
         }
         self.validate_source_domain_ledger_current(domain)?;
@@ -7263,6 +7366,11 @@ impl MarketGroupV16 {
             face_burn: Self::amount_from_bound_num(required_face_num)?,
             counterparty_credit_consumed,
             insurance_credit_consumed,
+            domain_effective_consumed: {
+                let mut consumed = [0u128; V16_DOMAIN_COUNT];
+                consumed[domain] = effective_credit;
+                consumed
+            },
         })
     }
 
@@ -7644,6 +7752,23 @@ impl MarketGroupV16 {
             return Err(V16Error::InvalidLeg);
         }
         Ok(domain)
+    }
+
+    fn source_domain_asset_side(&self, domain: usize) -> V16Result<(usize, SideV16)> {
+        self.validate_source_domain_index(domain)?;
+        let asset_index = domain / 2;
+        let source_side = decode_side((domain % 2) as u8)?;
+        Ok((asset_index, source_side))
+    }
+
+    fn account_has_active_exposure_for_source_domain(
+        &self,
+        account: &PortfolioAccountV16,
+        domain: usize,
+    ) -> V16Result<bool> {
+        let (asset_index, source_side) = self.source_domain_asset_side(domain)?;
+        let leg = account.legs[asset_index];
+        Ok(leg.active && opposite_side(leg.side) == source_side)
     }
 
     pub fn pending_domain_loss_barrier_count(

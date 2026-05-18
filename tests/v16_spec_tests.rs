@@ -351,6 +351,46 @@ fn v16_convert_released_pnl_requires_realizable_source_credit_when_claim_is_attr
 }
 
 #[test]
+fn v16_open_source_backed_conversion_locks_withdrawal_until_source_position_closes() {
+    let mut g = group();
+    let mut attacker = account();
+    let mut lp = account_with_id(77);
+    let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
+
+    g.vault = 1_000;
+    g.add_account_source_positive_pnl_not_atomic(&mut attacker, 0, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
+        .unwrap();
+    g.attach_leg(&mut attacker, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut lp, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.full_account_refresh(&mut attacker, &prices).unwrap();
+
+    let converted = g
+        .convert_released_pnl_to_capital_not_atomic(&mut attacker)
+        .unwrap();
+
+    assert_eq!(converted, 10);
+    assert_eq!(attacker.capital, 10);
+    assert_eq!(attacker.source_converted_capital_lock[0], 10);
+    assert_eq!(
+        g.withdraw_not_atomic(&mut attacker, 1, &prices),
+        Err(V16Error::LockActive),
+        "source-backed unrealized PnL may become margin capital but not withdrawable capital"
+    );
+    assert_eq!(attacker.capital, 10);
+
+    g.clear_leg(&mut attacker, 0).unwrap();
+    g.clear_leg(&mut lp, 0).unwrap();
+    assert_eq!(attacker.source_converted_capital_lock[0], 0);
+    g.withdraw_not_atomic(&mut attacker, converted, &prices)
+        .unwrap();
+    assert_eq!(attacker.capital, 0);
+}
+
+#[test]
 fn v16_expired_fresh_backing_requires_refresh_before_source_credit_conversion() {
     let mut g = group();
     let mut a = account();
