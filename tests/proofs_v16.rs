@@ -2,7 +2,7 @@
 
 use percolator::v16::{
     account_equity, risk_notional_ceil, AssetLifecycleV16, CloseProgressLedgerV16,
-    DeadLegForfeitOutcomeV16, HLockLaneV16, LiquidationRequestV16, MarketGroupV16,
+    DeadLegForfeitOutcomeV16, HLockLaneV16, HealthCertV16, LiquidationRequestV16, MarketGroupV16,
     MarketGroupV16Account, MarketModeV16, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
@@ -5838,6 +5838,169 @@ fn proof_v16_source_backed_open_conversion_rejects_before_mutation() {
             group.source_credit[0].spent_backing_num,
         )
     );
+}
+
+fn assert_v16_source_backed_open_conversion_rejects_for_configured_domain(domain: usize) {
+    let asset_index = domain / 2;
+    let source_side = if domain % 2 == 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let active_side = match source_side {
+        SideV16::Long => SideV16::Short,
+        SideV16::Short => SideV16::Long,
+    };
+    let signed_basis = match active_side {
+        SideV16::Long => POS_SCALE as i128,
+        SideV16::Short => -(POS_SCALE as i128),
+    };
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
+
+    group.vault = 100;
+    group
+        .add_account_source_positive_pnl_not_atomic(&mut account, domain, 4)
+        .unwrap();
+    group
+        .add_fresh_counterparty_backing_not_atomic(domain, 4 * BOUND_SCALE, 10)
+        .unwrap();
+    group
+        .attach_leg(&mut account, asset_index, active_side, signed_basis)
+        .unwrap();
+    group.full_account_refresh(&mut account, &prices).unwrap();
+
+    let before = (
+        account.capital,
+        account.pnl,
+        account.source_claim_bound_num[domain],
+        account.active_bitmap,
+        group.c_tot,
+        group.source_credit[domain].fresh_reserved_backing_num,
+        group.source_credit[domain].spent_backing_num,
+    );
+    let result = group.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        before,
+        (
+            account.capital,
+            account.pnl,
+            account.source_claim_bound_num[domain],
+            account.active_bitmap,
+            group.c_tot,
+            group.source_credit[domain].fresh_reserved_backing_num,
+            group.source_credit[domain].spent_backing_num,
+        )
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
+fn proof_v16_source_backed_open_conversion_rejects_for_configured_domain_1() {
+    assert_v16_source_backed_open_conversion_rejects_for_configured_domain(1);
+    kani::cover!(true, "v16 source exposure domain 1 covered");
+}
+
+#[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
+fn proof_v16_source_backed_open_conversion_rejects_for_configured_domain_2() {
+    assert_v16_source_backed_open_conversion_rejects_for_configured_domain(2);
+    kani::cover!(true, "v16 source exposure domain 2 covered");
+}
+
+#[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
+fn proof_v16_source_backed_open_conversion_rejects_for_configured_domain_3() {
+    assert_v16_source_backed_open_conversion_rejects_for_configured_domain(3);
+    kani::cover!(true, "v16 source exposure domain 3 covered");
+}
+
+fn certify_account_current_for_v16_conversion_proof(
+    group: &MarketGroupV16,
+    account: &mut PortfolioAccountV16,
+) {
+    account.health_cert = HealthCertV16 {
+        certified_equity: account.capital as i128 + account.pnl,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: group.oracle_epoch,
+        cert_funding_epoch: group.funding_epoch,
+        cert_risk_epoch: group.risk_epoch,
+        cert_asset_set_epoch: group.asset_set_epoch,
+        active_bitmap_at_cert: account.active_bitmap,
+        valid: true,
+    };
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
+fn proof_v16_source_backed_conversion_waits_only_for_contributing_source_exposure() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let mut source_counterparty =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [51; 32], owner));
+    let mut unrelated_counterparty =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [52; 32], owner));
+
+    group.vault = 100;
+    group
+        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 4)
+        .unwrap();
+    group
+        .add_fresh_counterparty_backing_not_atomic(0, 4 * BOUND_SCALE, 10)
+        .unwrap();
+    group
+        .attach_leg(&mut account, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group
+        .attach_leg(
+            &mut source_counterparty,
+            0,
+            SideV16::Long,
+            POS_SCALE as i128,
+        )
+        .unwrap();
+    certify_account_current_for_v16_conversion_proof(&group, &mut account);
+
+    let blocked = group.convert_released_pnl_to_capital_not_atomic(&mut account);
+    assert_eq!(blocked, Err(V16Error::LockActive));
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.pnl, 4);
+
+    group.clear_leg(&mut account, 0).unwrap();
+    group.clear_leg(&mut source_counterparty, 0).unwrap();
+    group.attach_leg(&mut account, 1, SideV16::Long, 1).unwrap();
+    group
+        .attach_leg(&mut unrelated_counterparty, 1, SideV16::Short, -1)
+        .unwrap();
+    certify_account_current_for_v16_conversion_proof(&group, &mut account);
+    let converted = group
+        .convert_released_pnl_to_capital_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(
+        converted == 4 && account.active_bitmap == (1u32 << 1),
+        "v16 source-backed conversion remains live with unrelated open exposure"
+    );
+    assert_eq!(converted, 4);
+    assert_eq!(account.capital, 4);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(account.active_bitmap, 1u32 << 1);
+    assert_eq!(group.source_credit[0].spent_backing_num, 4 * BOUND_SCALE);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
 }
 
 #[kani::proof]

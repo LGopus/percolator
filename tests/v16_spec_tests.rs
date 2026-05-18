@@ -391,6 +391,66 @@ fn v16_source_backed_conversion_waits_until_source_position_closes() {
 }
 
 #[test]
+fn v16_source_backed_conversion_only_waits_for_contributing_source_exposure() {
+    let (market, _, owner) = ids();
+    let mut g = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 10)).unwrap();
+    let mut claimant =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [78; 32], owner));
+    let mut source_counterparty =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [79; 32], owner));
+    let mut unrelated_counterparty =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [80; 32], owner));
+    let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
+
+    g.vault = 1_000;
+    g.add_account_source_positive_pnl_not_atomic(&mut claimant, 0, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
+        .unwrap();
+    g.attach_leg(&mut claimant, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(
+        &mut source_counterparty,
+        0,
+        SideV16::Long,
+        POS_SCALE as i128,
+    )
+    .unwrap();
+    g.full_account_refresh(&mut claimant, &prices).unwrap();
+    assert_eq!(
+        g.convert_released_pnl_to_capital_not_atomic(&mut claimant),
+        Err(V16Error::LockActive),
+        "source-backed credit must remain nonwithdrawable while its source exposure is open"
+    );
+
+    g.clear_leg(&mut claimant, 0).unwrap();
+    g.clear_leg(&mut source_counterparty, 0).unwrap();
+    g.attach_leg(&mut claimant, 1, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(
+        &mut unrelated_counterparty,
+        1,
+        SideV16::Short,
+        -(POS_SCALE as i128),
+    )
+    .unwrap();
+    g.full_account_refresh(&mut claimant, &prices).unwrap();
+
+    let converted = g
+        .convert_released_pnl_to_capital_not_atomic(&mut claimant)
+        .unwrap();
+    assert_eq!(
+        converted, 10,
+        "unrelated active exposure must not block conversion after the contributing source closes"
+    );
+    assert_eq!(claimant.capital, 10);
+    assert_eq!(claimant.pnl, 0);
+    assert_eq!(claimant.active_bitmap, 1u32 << 1);
+    assert_eq!(g.source_credit[0].spent_backing_num, 10 * BOUND_SCALE);
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
 fn v16_expired_fresh_backing_requires_refresh_before_source_credit_conversion() {
     let mut g = group();
     let mut a = account();
