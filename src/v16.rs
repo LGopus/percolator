@@ -3346,6 +3346,67 @@ impl MarketGroupV16 {
         Ok(charged)
     }
 
+    fn charge_account_fee_current_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        requested_fee: u128,
+    ) -> V16Result<u128> {
+        if requested_fee == 0 || account.pnl < 0 {
+            return Ok(0);
+        }
+        let charged = requested_fee.min(account.capital);
+        if charged == 0 {
+            return Ok(0);
+        }
+        let vault_before = self.vault;
+        account.capital -= charged;
+        self.c_tot = self
+            .c_tot
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        self.insurance = self
+            .insurance
+            .checked_add(charged)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        TokenValueFlowProofV16::account_capital_to_insurance(charged, vault_before, self.vault)?
+            .validate()?;
+        account.health_cert.valid = false;
+        Ok(charged)
+    }
+
+    fn recertify_account_after_source_lien_change(
+        &self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<HealthCertV16> {
+        let existing = account.health_cert;
+        if existing.active_bitmap_at_cert != account.active_bitmap {
+            return Err(V16Error::Stale);
+        }
+        let equity = self.account_haircut_equity(account)?;
+        let certified_liq_deficit = if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            let e = equity as u128;
+            existing.certified_maintenance_req.saturating_sub(e)
+        };
+        let cert = HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: existing.certified_initial_req,
+            certified_maintenance_req: existing.certified_maintenance_req,
+            certified_liq_deficit,
+            certified_worst_case_loss: existing.certified_worst_case_loss,
+            cert_oracle_epoch: self.oracle_epoch,
+            cert_funding_epoch: self.funding_epoch,
+            cert_risk_epoch: self.risk_epoch,
+            cert_asset_set_epoch: self.asset_set_epoch,
+            active_bitmap_at_cert: account.active_bitmap,
+            valid: true,
+        };
+        account.health_cert = cert;
+        self.validate_account_shape(account)?;
+        Ok(cert)
+    }
+
     pub fn sync_account_fee_to_slot_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
@@ -4311,6 +4372,17 @@ impl MarketGroupV16 {
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
+    fn settle_account_for_position_action_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
+        if account.b_stale_state || has_b_stale_leg(account) {
+            return Err(V16Error::BStale);
+        }
+        Ok(())
+    }
+
     pub fn accrue_asset_to_not_atomic(
         &mut self,
         asset_index: usize,
@@ -4467,16 +4539,8 @@ impl MarketGroupV16 {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        self.settle_account_side_effects_not_atomic(
-            long_account,
-            self.config.public_b_chunk_atoms,
-        )?;
-        self.settle_account_side_effects_not_atomic(
-            short_account,
-            self.config.public_b_chunk_atoms,
-        )?;
-        self.full_account_refresh(long_account, effective_prices)?;
-        self.full_account_refresh(short_account, effective_prices)?;
+        self.settle_account_for_position_action_not_atomic(long_account)?;
+        self.settle_account_for_position_action_not_atomic(short_account)?;
 
         let long_delta =
             i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -4511,8 +4575,8 @@ impl MarketGroupV16 {
 
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
-        self.charge_account_fee_not_atomic(long_account, fee)?;
-        self.charge_account_fee_not_atomic(short_account, fee)?;
+        self.charge_account_fee_current_not_atomic(long_account, fee)?;
+        self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
         self.apply_position_delta(short_account, request.asset_index, short_delta)?;
         self.full_account_refresh(long_account, effective_prices)?;
@@ -4520,8 +4584,8 @@ impl MarketGroupV16 {
         if risk_increasing && !locked {
             self.create_initial_margin_source_lien_if_needed(long_account)?;
             self.create_initial_margin_source_lien_if_needed(short_account)?;
-            self.full_account_refresh(long_account, effective_prices)?;
-            self.full_account_refresh(short_account, effective_prices)?;
+            self.recertify_account_after_source_lien_change(long_account)?;
+            self.recertify_account_after_source_lien_change(short_account)?;
         }
         ensure_initial_margin(long_account)?;
         ensure_initial_margin(short_account)?;
