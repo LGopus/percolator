@@ -26,6 +26,18 @@ fn group() -> MarketGroupV16 {
     MarketGroupV16::new(market, V16Config::public_user_fund(4, 0, 10)).unwrap()
 }
 
+fn bitmap(indices: &[usize]) -> percolator::V16ActiveBitmap {
+    let mut out = percolator::active_bitmap_empty();
+    for &idx in indices {
+        percolator::active_bitmap_set(&mut out, idx).unwrap();
+    }
+    out
+}
+
+fn bitmap_count_ones(bitmap: percolator::V16ActiveBitmap) -> u32 {
+    bitmap.iter().map(|word| word.count_ones()).sum()
+}
+
 fn set_junior_bound(group: &mut MarketGroupV16, amount: u128) {
     group.pnl_pos_bound_tot = amount;
     group.pnl_pos_bound_tot_num = amount.checked_mul(BOUND_SCALE).unwrap();
@@ -445,7 +457,7 @@ fn v16_source_backed_conversion_only_waits_for_contributing_source_exposure() {
     );
     assert_eq!(claimant.capital, 10);
     assert_eq!(claimant.pnl, 0);
-    assert_eq!(claimant.active_bitmap, 1u32 << 1);
+    assert_eq!(claimant.active_bitmap, bitmap(&[1]));
     assert_eq!(g.source_credit[0].spent_backing_num, 10 * BOUND_SCALE);
     g.assert_public_invariants().unwrap();
 }
@@ -960,7 +972,7 @@ fn v16_asset_retire_requires_empty_source_credit_state() {
         .unwrap();
 
     assert_eq!(
-        g.retire_empty_asset_not_atomic(0),
+        g.retire_empty_asset_not_atomic(0, 1),
         Err(V16Error::LockActive),
         "asset retirement must not orphan source-credit backing or claims"
     );
@@ -994,6 +1006,7 @@ fn attach_opposite(
 fn active_leg(side: SideV16, basis_pos_q: i128) -> PortfolioLegV16 {
     PortfolioLegV16 {
         active: true,
+        market_id: 1,
         side,
         basis_pos_q,
         a_basis: ADL_ONE,
@@ -1154,7 +1167,7 @@ fn v16_asset_lifecycle_blocks_new_risk_unless_active() {
         Err(V16Error::LockActive)
     );
     assert_eq!(g.assets[0], before_asset);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
 
     let mut long = account();
     let mut short = account_with_id(9);
@@ -1230,12 +1243,12 @@ fn v16_asset_retire_and_activation_require_empty_asset_state_and_invalidate_cert
     g.deposit_not_atomic(&mut a, 10_000).unwrap();
     g.attach_leg(&mut a, 0, SideV16::Long, 1).unwrap();
     assert_eq!(
-        g.retire_empty_asset_not_atomic(0),
+        g.retire_empty_asset_not_atomic(0, 1),
         Err(V16Error::LockActive),
         "retirement must fail closed while OI or stored positions remain"
     );
     g.clear_leg(&mut a, 0).unwrap();
-    g.retire_empty_asset_not_atomic(0).unwrap();
+    g.retire_empty_asset_not_atomic(0, 1).unwrap();
     assert_eq!(g.assets[0].lifecycle, AssetLifecycleV16::Retired);
 
     g.full_account_refresh(&mut a, &[100; V16_MAX_PORTFOLIO_ASSETS_N])
@@ -1260,16 +1273,64 @@ fn v16_asset_retire_and_activation_require_empty_asset_state_and_invalidate_cert
 }
 
 #[test]
+fn v16_reused_asset_index_gets_monotonic_market_id_after_shutdown_timeout() {
+    let mut g = group();
+    g.config.asset_activation_cooldown_slots = 2;
+    let mut a = account();
+    let mut b = account_with_id(7);
+
+    g.attach_leg(&mut a, 0, SideV16::Long, 10).unwrap();
+    g.attach_leg(&mut b, 0, SideV16::Short, -10).unwrap();
+    let old_market_id = g.assets[0].market_id;
+    let next_market_id_before = g.next_market_id;
+    assert_eq!(a.legs[0].market_id, old_market_id);
+
+    g.clear_leg(&mut a, 0).unwrap();
+    g.clear_leg(&mut b, 0).unwrap();
+    g.retire_empty_asset_not_atomic(0, 1).unwrap();
+    assert_eq!(
+        g.activate_empty_asset_not_atomic(0, 100, 2),
+        Err(V16Error::LockActive),
+        "freed asset slots cannot be reused before their shutdown timeout"
+    );
+    g.activate_empty_asset_not_atomic(0, 100, 3).unwrap();
+    assert_eq!(g.assets[0].market_id, next_market_id_before);
+    assert!(g.assets[0].market_id > old_market_id);
+    assert_eq!(g.next_market_id, next_market_id_before + 1);
+
+    a.legs[0] = active_leg(SideV16::Long, 10);
+    a.legs[0].market_id = old_market_id;
+    a.active_bitmap = bitmap(&[0]);
+    assert_eq!(
+        g.validate_account_shape(&a),
+        Err(V16Error::HiddenLeg),
+        "stale portfolio legs from an old asset market_id must not bind to the reused slot"
+    );
+
+    let mut stale_claim = account();
+    stale_claim.pnl = 1;
+    stale_claim.source_claim_market_id[0] = old_market_id;
+    stale_claim.source_claim_bound_num[0] = BOUND_SCALE;
+    assert_eq!(
+        g.validate_account_shape(&stale_claim),
+        Err(V16Error::HiddenLeg),
+        "stale source-credit claims from an old market_id must not bind to the reused slot"
+    );
+}
+
+#[test]
 fn v16_retired_asset_idempotence_still_requires_empty_state() {
     let mut g = group();
     g.assets[0].lifecycle = AssetLifecycleV16::Retired;
+    g.assets[0].retired_slot = 1;
+    g.current_slot = 1;
     g.assets[0].oi_eff_long_q = 1;
     g.assets[0].stored_pos_count_long = 1;
     g.assets[0].loss_weight_sum_long = 1;
     let before = g;
 
     assert_eq!(
-        g.retire_empty_asset_not_atomic(0),
+        g.retire_empty_asset_not_atomic(0, 1),
         Err(V16Error::LockActive),
         "retired asset idempotence must not bless nonempty accounting state"
     );
@@ -1281,23 +1342,28 @@ fn v16_asset_activation_cooldown_rate_limits_asset_set_churn() {
     let mut g = group();
     g.config.asset_activation_cooldown_slots = 3;
 
-    g.retire_empty_asset_not_atomic(0).unwrap();
-    g.activate_empty_asset_not_atomic(0, 100, 1).unwrap();
+    g.retire_empty_asset_not_atomic(0, 1).unwrap();
+    assert_eq!(
+        g.activate_empty_asset_not_atomic(0, 100, 3),
+        Err(V16Error::LockActive),
+        "a retired asset index cannot be reused before the configured shutdown timeout"
+    );
+    g.activate_empty_asset_not_atomic(0, 100, 4).unwrap();
     assert_eq!(g.asset_activation_count, 1);
-    assert_eq!(g.last_asset_activation_slot, 1);
+    assert_eq!(g.last_asset_activation_slot, 4);
 
-    g.retire_empty_asset_not_atomic(1).unwrap();
+    g.retire_empty_asset_not_atomic(1, 4).unwrap();
     let before = g.assets[1];
     assert_eq!(
-        g.activate_empty_asset_not_atomic(1, 100, 2),
+        g.activate_empty_asset_not_atomic(1, 100, 6),
         Err(V16Error::LockActive),
         "a second activation before the configured cooldown must fail closed"
     );
     assert_eq!(g.assets[1], before);
 
-    g.activate_empty_asset_not_atomic(1, 100, 4).unwrap();
+    g.activate_empty_asset_not_atomic(1, 100, 7).unwrap();
     assert_eq!(g.asset_activation_count, 2);
-    assert_eq!(g.last_asset_activation_slot, 4);
+    assert_eq!(g.last_asset_activation_slot, 7);
     assert_eq!(g.assets[1].lifecycle, AssetLifecycleV16::Active);
 }
 
@@ -1321,11 +1387,11 @@ fn v16_active_bitmap_is_the_only_active_leg_authority() {
     a.legs[0] = active_leg(SideV16::Long, 1);
     assert_eq!(g.validate_account_shape(&a), Err(V16Error::HiddenLeg));
 
-    a.active_bitmap = 1;
+    a.active_bitmap = bitmap(&[0]);
     assert_eq!(g.validate_account_shape(&a), Ok(()));
 
     a.legs[5] = active_leg(SideV16::Short, -1);
-    a.active_bitmap |= 1 << 5;
+    percolator::active_bitmap_set(&mut a.active_bitmap, 5).unwrap();
     assert_eq!(g.validate_account_shape(&a), Err(V16Error::HiddenLeg));
 }
 
@@ -1344,12 +1410,12 @@ fn v16_same_asset_duplicate_leg_cannot_double_count_support() {
     );
     assert_eq!(a, account_before);
     assert_eq!(g.assets[0], asset_before);
-    assert_eq!(a.active_bitmap.count_ones(), 1);
+    assert_eq!(bitmap_count_ones(a.active_bitmap), 1);
     assert_eq!(g.validate_account_shape(&a), Ok(()));
 
     g.full_account_refresh(&mut a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
-    assert_eq!(a.health_cert.active_bitmap_at_cert, 1);
+    assert_eq!(a.health_cert.active_bitmap_at_cert, bitmap(&[0]));
 }
 
 #[test]
@@ -1965,7 +2031,7 @@ fn v16_b_stale_blocks_refresh_and_favorable_actions_without_scanning_market() {
 #[test]
 fn v16_public_init_rejects_unbounded_portfolio_width() {
     let (market, _, _) = ids();
-    let cfg = V16Config::public_user_fund((V16_MAX_PORTFOLIO_ASSETS_N + 1) as u8, 0, 10);
+    let cfg = V16Config::public_user_fund((V16_MAX_PORTFOLIO_ASSETS_N + 1) as u16, 0, 10);
     assert_eq!(
         MarketGroupV16::new(market, cfg),
         Err(V16Error::InvalidConfig)
@@ -2325,7 +2391,7 @@ fn v16_authoritatively_flat_account_never_receives_b_loss() {
         .unwrap();
 
     assert_eq!(outcome, PermissionlessProgressOutcomeV16::AccountCurrent);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert_eq!(a.pnl, 0);
     assert_eq!(a.capital, 100);
     assert!(!a.b_stale_state);
@@ -2472,13 +2538,13 @@ fn v16_attach_and_clear_leg_update_only_bounded_account_and_asset_state() {
     let mut a = account();
 
     g.attach_leg(&mut a, 1, SideV16::Short, -7).unwrap();
-    assert_eq!(a.active_bitmap, 1 << 1);
+    assert_eq!(a.active_bitmap, bitmap(&[1]));
     assert_eq!(g.assets[1].stored_pos_count_short, 1);
     assert_eq!(g.assets[1].oi_eff_short_q, 7);
     assert_eq!(g.assets[1].loss_weight_sum_short, 7);
 
     g.clear_leg(&mut a, 1).unwrap();
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert_eq!(g.assets[1].stored_pos_count_short, 0);
     assert_eq!(g.assets[1].oi_eff_short_q, 0);
     assert_eq!(g.assets[1].loss_weight_sum_short, 0);
@@ -2498,8 +2564,8 @@ fn v16_bilateral_oi_decomposition_counts_only_active_side_exposure() {
     assert_eq!(g.assets[0].oi_eff_short_q, 3);
     assert_eq!(g.assets[0].stored_pos_count_long, 1);
     assert_eq!(g.assets[0].stored_pos_count_short, 1);
-    assert_eq!(long.active_bitmap, 1);
-    assert_eq!(short.active_bitmap, 1);
+    assert_eq!(long.active_bitmap, bitmap(&[0]));
+    assert_eq!(short.active_bitmap, bitmap(&[0]));
     assert_eq!(long.legs[0].basis_pos_q, 3);
     assert_eq!(short.legs[0].basis_pos_q, -3);
 }
@@ -2517,7 +2583,7 @@ fn v16_oversize_position_is_rejected_before_oi_mutation() {
     );
 
     assert_eq!(res, Err(V16Error::InvalidLeg));
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
 }
 
@@ -2661,7 +2727,7 @@ fn v16_permissionless_recovery_enters_terminal_mode_and_enables_dead_leg_forfeit
     let out = g.forfeit_recovery_leg_not_atomic(&mut a, 0, 1).unwrap();
 
     assert!(out.detached);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
     assert_eq!(g.recovery_reason, Some(reason));
     assert_eq!(g.mode, MarketModeV16::Recovery);
@@ -3037,8 +3103,8 @@ fn v16_target_effective_lag_blocks_risk_increasing_trade_before_mutation() {
     );
 
     assert_eq!(res, Err(V16Error::LockActive));
-    assert_eq!(long.active_bitmap, 0);
-    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(long.active_bitmap, bitmap(&[]));
+    assert_eq!(short.active_bitmap, bitmap(&[]));
 }
 
 #[test]
@@ -3303,8 +3369,8 @@ fn v16_trade_fee_is_dynamic_bounded_and_charged_inside_engine() {
         .unwrap();
     assert_eq!(out.notional, 1_000);
     assert_eq!(out.fee_a, 5);
-    assert_eq!(long.active_bitmap, 1);
-    assert_eq!(short.active_bitmap, 1);
+    assert_eq!(long.active_bitmap, bitmap(&[0]));
+    assert_eq!(short.active_bitmap, bitmap(&[0]));
     assert_eq!(g.insurance, 10);
 
     let mut bad_req = req;
@@ -3380,7 +3446,7 @@ fn v16_risk_increasing_trade_requires_initial_health_after_refresh() {
         matches!(res, Err(V16Error::InvalidConfig | V16Error::LockActive)),
         "risk increase must fail before mutation when initial health cannot be satisfied without an available source-credit lien"
     );
-    assert_eq!(underfunded_long.active_bitmap, 0);
+    assert_eq!(underfunded_long.active_bitmap, bitmap(&[]));
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
     assert_eq!(g.assets[0].oi_eff_short_q, 0);
 }
@@ -3562,8 +3628,8 @@ fn v16_e2e_trade_mark_close_convert_withdraw_conserves() {
         &px2,
     )
     .unwrap();
-    assert_eq!(alice.active_bitmap, 0);
-    assert_eq!(bob.active_bitmap, 0);
+    assert_eq!(alice.active_bitmap, bitmap(&[]));
+    assert_eq!(bob.active_bitmap, bitmap(&[]));
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
     assert_eq!(g.assets[0].oi_eff_short_q, 0);
 
@@ -4191,6 +4257,7 @@ fn v16_pending_close_progress_blocks_domain_escape_until_finalized() {
         finalized: false,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 10,
         drift_reference_slot: g.current_slot,
@@ -4212,6 +4279,7 @@ fn v16_cure_and_cancel_close_releases_barrier_and_escrow_before_irreversible_pro
         active: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 5,
         drift_reference_slot: g.current_slot,
@@ -4247,6 +4315,7 @@ fn v16_cure_and_cancel_close_rejects_after_irreversible_progress_without_consumi
         active: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 5,
         drift_reference_slot: g.current_slot,
@@ -4282,6 +4351,7 @@ fn v16_new_close_cannot_overwrite_active_finalized_close_ledger() {
         finalized: true,
         close_id: 7,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 2,
         b_loss_booked: 2,
@@ -4733,6 +4803,7 @@ fn v16_expired_close_progress_routes_recovery_before_b_booking() {
         finalized: false,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 2,
         drift_reference_slot: 0,
@@ -4818,6 +4889,7 @@ fn v16_expired_close_progress_routes_recovery_before_quantity_adl() {
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -4863,6 +4935,7 @@ fn v16_stale_active_close_residual_routes_recovery_before_b_booking() {
         finalized: false,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 2,
         drift_reference_slot: 0,
@@ -4899,6 +4972,7 @@ fn v16_stale_active_close_routes_recovery_before_quantity_adl() {
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -5010,6 +5084,7 @@ fn v16_quantity_adl_reduces_opposing_a_or_starts_reset_after_residual_durable() 
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -5037,6 +5112,7 @@ fn v16_quantity_adl_reduces_opposing_a_or_starts_reset_after_residual_durable() 
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -5068,6 +5144,7 @@ fn v16_quantity_adl_finalizes_closing_leg_atomically_with_aggregate_oi() {
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -5081,7 +5158,7 @@ fn v16_quantity_adl_finalizes_closing_leg_atomically_with_aggregate_oi() {
         .unwrap();
 
     assert_eq!(out.closed_q, 4);
-    assert_eq!(closing.active_bitmap, 0);
+    assert_eq!(closing.active_bitmap, bitmap(&[]));
     assert!(!closing.legs[0].active);
     assert_eq!(closing.close_progress.quantity_adl_applied_q, 4);
     assert_eq!(g.assets[0].oi_eff_long_q, 6);
@@ -5112,6 +5189,7 @@ fn v16_quantity_adl_requires_finalized_matching_close_ledger() {
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Long,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -5138,6 +5216,7 @@ fn v16_account_shape_rejects_malformed_quantity_adl_close_progress() {
         finalized: false,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 2,
         b_loss_booked: 1,
@@ -5158,6 +5237,7 @@ fn v16_account_shape_rejects_malformed_quantity_adl_close_progress() {
         finalized: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
@@ -5180,6 +5260,7 @@ fn v16_account_shape_rejects_malformed_canceled_close_progress() {
         canceled: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 5,
         drift_reference_slot: 0,
@@ -5199,6 +5280,7 @@ fn v16_account_shape_rejects_malformed_canceled_close_progress() {
         canceled: true,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Short,
         gross_loss_at_close_start: 5,
         drift_reference_slot: 0,
@@ -5222,6 +5304,7 @@ fn v16_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
         finalized: false,
         close_id: 1,
         asset_index: 0,
+        market_id: g.assets[0].market_id,
         domain_side: SideV16::Long,
         gross_loss_at_close_start: 2,
         b_loss_booked: 1,
@@ -5495,7 +5578,7 @@ fn v16_worst_case_hinted_progress_actions_are_total_and_bounded() {
         )
         .unwrap();
     assert_eq!(out, PermissionlessProgressOutcomeV16::AccountCurrent);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
 
     let mut g = group();
     let mut a = account();
@@ -5519,8 +5602,7 @@ fn v16_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual() 
     let mut g = group();
     let mut victim = account();
     let _opposite = attach_opposite(&mut g, 0, SideV16::Long, 1, 105);
-    g.attach_leg(&mut victim, 0, SideV16::Long, 1)
-        .unwrap();
+    g.attach_leg(&mut victim, 0, SideV16::Long, 1).unwrap();
     g.vault = 1;
     g.insurance = 1;
     victim.pnl = -3;
@@ -5546,7 +5628,7 @@ fn v16_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual() 
 
     assert_eq!(out, PermissionlessProgressOutcomeV16::AccountCurrent);
     assert_eq!(victim.pnl, 0);
-    assert_eq!(victim.active_bitmap, 0);
+    assert_eq!(victim.active_bitmap, bitmap(&[]));
     assert_eq!(g.insurance, 0);
     assert_eq!(g.negative_pnl_account_count, 0);
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
@@ -5621,7 +5703,7 @@ fn v16_resolved_close_with_active_position_returns_progress_only() {
 
     assert_eq!(out, ResolvedCloseOutcomeV16::ProgressOnly);
     assert_eq!(a.capital, 777);
-    assert_ne!(a.active_bitmap, 0);
+    assert_ne!(a.active_bitmap, bitmap(&[]));
     assert_eq!(g.vault, before_vault);
     assert_eq!(g.c_tot, before_c_tot);
 }
@@ -5645,7 +5727,7 @@ fn v16_resolved_close_returns_progress_after_partial_b_settlement() {
     assert!(a.legs[0].b_snap > 0);
     assert!(a.legs[0].b_snap < g.assets[0].b_long_num);
     assert_eq!(a.last_fee_slot, 0);
-    assert_eq!(a.active_bitmap, 1);
+    assert_eq!(a.active_bitmap, bitmap(&[0]));
 }
 
 #[test]
@@ -5847,7 +5929,7 @@ fn v16_dead_leg_forfeit_detaches_without_crediting_positive_pnl() {
         "forfeited dead-leg profit must not become account credit"
     );
     assert_eq!(g.pnl_pos_tot, 0);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert!(!a.legs[0].active);
     assert!(unrelated.legs[1].active);
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
@@ -6113,7 +6195,7 @@ fn v16_liquidation_requires_strict_account_risk_progress() {
         .liquidate_account_not_atomic(&mut a, req, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(out.closed_q, POS_SCALE);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
 }
 
 #[test]
@@ -6230,7 +6312,7 @@ fn v16_min_liquidation_abs_shortfall_does_not_block_risk_close() {
     assert_eq!(out.closed_q, POS_SCALE);
     assert_eq!(out.fee_charged, 20);
     assert_eq!(a.capital, 0);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert_eq!(g.insurance, 20);
     assert_eq!(g.c_tot, 0);
     assert_eq!(g.vault, 20);
@@ -6268,7 +6350,7 @@ fn v16_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     assert_eq!(g.vault, 4);
     assert_eq!(g.insurance, 0);
     assert_eq!(a.pnl, 0);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
     assert_eq!(
         g.stock_reconciliation_proof().unwrap(),
         StockReconciliationProofV16 {
@@ -6316,7 +6398,7 @@ fn v16_domain_insurance_budget_caps_bankruptcy_spend_for_one_asset_side() {
     assert_eq!(g.insurance_domain_spent[short_domain_for_bankrupt_long], 3);
     assert_eq!(g.insurance_domain_spent[0], 0);
     assert_eq!(a.pnl, 0);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
 }
 
 #[test]
@@ -6347,7 +6429,7 @@ fn v16_two_asset_refresh_without_source_backing_handles_exact_capital_loss() {
     assert_eq!(a.capital, 0);
     assert_eq!(g.c_tot, 0);
     assert_eq!(cert.certified_equity, 0);
-    assert_eq!(a.active_bitmap, 0b11);
+    assert_eq!(a.active_bitmap, bitmap(&[0, 1]));
     assert_eq!(a.legs[0].k_snap, ADL_ONE as i128);
     assert_eq!(a.legs[1].k_snap, -2 * (ADL_ONE as i128));
 }
@@ -6402,7 +6484,7 @@ fn v16_liquidation_residual_domain_is_opposite_side_for_long_and_short() {
         assert_eq!(g.insurance_domain_spent[expected_domain], 3);
         assert_eq!(g.insurance_domain_spent[unrelated_domain], 0);
         assert_eq!(bankrupt.pnl, 0);
-        assert_eq!(bankrupt.active_bitmap, 0);
+        assert_eq!(bankrupt.active_bitmap, bitmap(&[]));
     }
 }
 
@@ -6441,7 +6523,7 @@ fn v16_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
         Ok(0)
     );
     assert_eq!(bankrupt.pnl, 0);
-    assert_eq!(bankrupt.active_bitmap, 0);
+    assert_eq!(bankrupt.active_bitmap, bitmap(&[]));
 }
 
 #[test]
@@ -6482,7 +6564,7 @@ fn v16_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() 
     assert_eq!(out.explicit_loss, 0);
     assert_eq!(g.insurance, 0);
     assert_eq!(a.pnl, 0);
-    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
 }
 
 #[test]

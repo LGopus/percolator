@@ -18,6 +18,9 @@ use crate::{
 };
 
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
+pub const V16_ACTIVE_BITMAP_WORDS: usize = (V16_MAX_PORTFOLIO_ASSETS_N + 63) / 64;
+pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
+pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_DOMAIN_COUNT: usize = V16_MAX_PORTFOLIO_ASSETS_N * 2;
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 16;
@@ -40,6 +43,75 @@ pub enum V16Error {
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
+
+#[inline]
+pub const fn active_bitmap_empty() -> V16ActiveBitmap {
+    V16_EMPTY_ACTIVE_BITMAP
+}
+
+#[inline]
+pub fn active_bitmap_is_empty(bitmap: V16ActiveBitmap) -> bool {
+    let mut i = 0;
+    while i < V16_ACTIVE_BITMAP_WORDS {
+        if bitmap[i] != 0 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+#[inline]
+pub fn active_bitmap_get(bitmap: V16ActiveBitmap, asset_index: usize) -> bool {
+    if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+        return false;
+    }
+    let word = asset_index / 64;
+    let bit = asset_index % 64;
+    ((bitmap[word] >> bit) & 1) != 0
+}
+
+#[inline]
+pub fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, asset_index: usize) -> V16Result<()> {
+    if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+        return Err(V16Error::InvalidConfig);
+    }
+    let word = asset_index / 64;
+    let bit = asset_index % 64;
+    bitmap[word] |= 1u64 << bit;
+    Ok(())
+}
+
+#[inline]
+pub fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, asset_index: usize) -> V16Result<()> {
+    if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+        return Err(V16Error::InvalidConfig);
+    }
+    let word = asset_index / 64;
+    let bit = asset_index % 64;
+    bitmap[word] &= !(1u64 << bit);
+    Ok(())
+}
+
+#[inline]
+pub fn active_bitmap_with_cleared(
+    mut bitmap: V16ActiveBitmap,
+    asset_index: usize,
+) -> V16Result<V16ActiveBitmap> {
+    active_bitmap_clear(&mut bitmap, asset_index)?;
+    Ok(bitmap)
+}
+
+#[inline]
+pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
+    let mut total = 0u32;
+    let mut i = 0;
+    while i < V16_ACTIVE_BITMAP_WORDS {
+        total = total.saturating_add(bitmap[i].count_ones());
+        i += 1;
+    }
+    total
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HLockLaneV16 {
@@ -132,7 +204,7 @@ impl ProvenanceHeaderV16 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V16Config {
-    pub max_portfolio_assets: u8,
+    pub max_portfolio_assets: u16,
     pub min_nonzero_mm_req: u128,
     pub min_nonzero_im_req: u128,
     pub h_min: u64,
@@ -167,7 +239,7 @@ pub struct V16Config {
 }
 
 impl V16Config {
-    pub const fn public_user_fund(max_portfolio_assets: u8, h_min: u64, h_max: u64) -> Self {
+    pub const fn public_user_fund(max_portfolio_assets: u16, h_min: u64, h_max: u64) -> Self {
         Self {
             max_portfolio_assets,
             min_nonzero_mm_req: 1,
@@ -617,6 +689,8 @@ impl V16Config {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetStateV16 {
+    pub market_id: u64,
+    pub retired_slot: u64,
     pub lifecycle: AssetLifecycleV16,
     pub raw_oracle_target_price: u64,
     pub effective_price: u64,
@@ -661,6 +735,8 @@ pub struct AssetStateV16 {
 impl Default for AssetStateV16 {
     fn default() -> Self {
         Self {
+            market_id: 0,
+            retired_slot: 0,
             lifecycle: AssetLifecycleV16::Active,
             raw_oracle_target_price: 1,
             effective_price: 1,
@@ -800,6 +876,7 @@ impl Default for InsuranceCreditReservationV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortfolioLegV16 {
     pub active: bool,
+    pub market_id: u64,
     pub side: SideV16,
     pub basis_pos_q: i128,
     pub a_basis: u128,
@@ -817,6 +894,7 @@ pub struct PortfolioLegV16 {
 impl PortfolioLegV16 {
     pub const EMPTY: Self = Self {
         active: false,
+        market_id: 0,
         side: SideV16::Long,
         basis_pos_q: 0,
         a_basis: ADL_ONE,
@@ -850,7 +928,7 @@ pub struct HealthCertV16 {
     pub cert_funding_epoch: u64,
     pub cert_risk_epoch: u64,
     pub cert_asset_set_epoch: u64,
-    pub active_bitmap_at_cert: u32,
+    pub active_bitmap_at_cert: V16ActiveBitmap,
     pub valid: bool,
 }
 
@@ -861,7 +939,8 @@ pub struct CloseProgressLedgerV16 {
     pub finalized: bool,
     pub canceled: bool,
     pub close_id: u64,
-    pub asset_index: u8,
+    pub asset_index: u16,
+    pub market_id: u64,
     pub domain_side: SideV16,
     pub gross_loss_at_close_start: u128,
     pub drift_reference_slot: u64,
@@ -883,6 +962,7 @@ impl CloseProgressLedgerV16 {
         canceled: false,
         close_id: 0,
         asset_index: 0,
+        market_id: 0,
         domain_side: SideV16::Long,
         gross_loss_at_close_start: 0,
         drift_reference_slot: 0,
@@ -986,6 +1066,7 @@ pub struct PortfolioAccountV16 {
     pub capital: u128,
     pub pnl: i128,
     pub reserved_pnl: u128,
+    pub source_claim_market_id: [u64; V16_DOMAIN_COUNT],
     pub source_claim_bound_num: [u128; V16_DOMAIN_COUNT],
     pub source_claim_liened_num: [u128; V16_DOMAIN_COUNT],
     pub source_claim_counterparty_liened_num: [u128; V16_DOMAIN_COUNT],
@@ -998,7 +1079,7 @@ pub struct PortfolioAccountV16 {
     pub fee_credits: i128,
     pub cancel_deposit_escrow: u128,
     pub last_fee_slot: u64,
-    pub active_bitmap: u32,
+    pub active_bitmap: V16ActiveBitmap,
     pub legs: [PortfolioLegV16; V16_MAX_PORTFOLIO_ASSETS_N],
     pub health_cert: HealthCertV16,
     pub stale_state: bool,
@@ -1017,6 +1098,7 @@ impl PortfolioAccountV16 {
             capital: 0,
             pnl: 0,
             reserved_pnl: 0,
+            source_claim_market_id: [0; V16_DOMAIN_COUNT],
             source_claim_bound_num: [0; V16_DOMAIN_COUNT],
             source_claim_liened_num: [0; V16_DOMAIN_COUNT],
             source_claim_counterparty_liened_num: [0; V16_DOMAIN_COUNT],
@@ -1029,7 +1111,7 @@ impl PortfolioAccountV16 {
             fee_credits: 0,
             cancel_deposit_escrow: 0,
             last_fee_slot: 0,
-            active_bitmap: 0,
+            active_bitmap: active_bitmap_empty(),
             legs: [PortfolioLegV16::EMPTY; V16_MAX_PORTFOLIO_ASSETS_N],
             health_cert: HealthCertV16 {
                 certified_equity: 0,
@@ -1041,7 +1123,7 @@ impl PortfolioAccountV16 {
                 cert_funding_epoch: 0,
                 cert_risk_epoch: 0,
                 cert_asset_set_epoch: 0,
-                active_bitmap_at_cert: 0,
+                active_bitmap_at_cert: active_bitmap_empty(),
                 valid: false,
             },
             stale_state: false,
@@ -1080,6 +1162,7 @@ pub struct MarketGroupV16 {
     pub asset_set_epoch: u64,
     pub asset_activation_count: u64,
     pub last_asset_activation_slot: u64,
+    pub next_market_id: u64,
     pub oracle_epoch: u64,
     pub funding_epoch: u64,
     pub slot_last: u64,
@@ -1558,7 +1641,6 @@ struct SourceCreditConsumptionV16 {
     face_burn: u128,
     counterparty_credit_consumed: u128,
     insurance_credit_consumed: u128,
-    domain_effective_consumed: [u128; V16_DOMAIN_COUNT],
 }
 
 #[repr(C)]
@@ -1776,7 +1858,7 @@ impl ProvenanceHeaderV16Account {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct V16ConfigAccount {
-    pub max_portfolio_assets: u8,
+    pub max_portfolio_assets: V16PodU16,
     pub min_nonzero_mm_req: V16PodU128,
     pub min_nonzero_im_req: V16PodU128,
     pub h_min: V16PodU64,
@@ -1813,7 +1895,7 @@ pub struct V16ConfigAccount {
 impl V16ConfigAccount {
     pub fn from_runtime(value: &V16Config) -> Self {
         Self {
-            max_portfolio_assets: value.max_portfolio_assets,
+            max_portfolio_assets: V16PodU16::new(value.max_portfolio_assets),
             min_nonzero_mm_req: V16PodU128::new(value.min_nonzero_mm_req),
             min_nonzero_im_req: V16PodU128::new(value.min_nonzero_im_req),
             h_min: V16PodU64::new(value.h_min),
@@ -1864,7 +1946,7 @@ impl V16ConfigAccount {
 
     pub fn try_to_runtime(&self) -> V16Result<V16Config> {
         let out = V16Config {
-            max_portfolio_assets: self.max_portfolio_assets,
+            max_portfolio_assets: self.max_portfolio_assets.get(),
             min_nonzero_mm_req: self.min_nonzero_mm_req.get(),
             min_nonzero_im_req: self.min_nonzero_im_req.get(),
             h_min: self.h_min.get(),
@@ -2038,6 +2120,8 @@ impl InsuranceCreditReservationV16Account {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct AssetStateV16Account {
+    pub market_id: V16PodU64,
+    pub retired_slot: V16PodU64,
     pub lifecycle: u8,
     pub raw_oracle_target_price: V16PodU64,
     pub effective_price: V16PodU64,
@@ -2082,6 +2166,8 @@ pub struct AssetStateV16Account {
 impl AssetStateV16Account {
     pub fn from_runtime(value: &AssetStateV16) -> Self {
         Self {
+            market_id: V16PodU64::new(value.market_id),
+            retired_slot: V16PodU64::new(value.retired_slot),
             lifecycle: encode_asset_lifecycle(value.lifecycle),
             raw_oracle_target_price: V16PodU64::new(value.raw_oracle_target_price),
             effective_price: V16PodU64::new(value.effective_price),
@@ -2126,6 +2212,8 @@ impl AssetStateV16Account {
 
     pub fn try_to_runtime(&self) -> V16Result<AssetStateV16> {
         let out = AssetStateV16 {
+            market_id: self.market_id.get(),
+            retired_slot: self.retired_slot.get(),
             lifecycle: decode_asset_lifecycle(self.lifecycle)?,
             raw_oracle_target_price: self.raw_oracle_target_price.get(),
             effective_price: self.effective_price.get(),
@@ -2182,6 +2270,7 @@ impl AssetStateV16Account {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct PortfolioLegV16Account {
     pub active: u8,
+    pub market_id: V16PodU64,
     pub side: u8,
     pub basis_pos_q: V16PodI128,
     pub a_basis: V16PodU128,
@@ -2200,6 +2289,7 @@ impl PortfolioLegV16Account {
     pub fn from_runtime(value: &PortfolioLegV16) -> Self {
         Self {
             active: encode_bool(value.active),
+            market_id: V16PodU64::new(value.market_id),
             side: encode_side(value.side),
             basis_pos_q: V16PodI128::new(value.basis_pos_q),
             a_basis: V16PodU128::new(value.a_basis),
@@ -2218,6 +2308,7 @@ impl PortfolioLegV16Account {
     pub fn try_to_runtime(&self) -> V16Result<PortfolioLegV16> {
         let out = PortfolioLegV16 {
             active: decode_bool(self.active)?,
+            market_id: self.market_id.get(),
             side: decode_side(self.side)?,
             basis_pos_q: self.basis_pos_q.get(),
             a_basis: self.a_basis.get(),
@@ -2252,7 +2343,7 @@ pub struct HealthCertV16Account {
     pub cert_funding_epoch: V16PodU64,
     pub cert_risk_epoch: V16PodU64,
     pub cert_asset_set_epoch: V16PodU64,
-    pub active_bitmap_at_cert: V16PodU32,
+    pub active_bitmap_at_cert: [V16PodU64; V16_ACTIVE_BITMAP_WORDS],
     pub valid: u8,
 }
 
@@ -2268,7 +2359,7 @@ impl HealthCertV16Account {
             cert_funding_epoch: V16PodU64::new(value.cert_funding_epoch),
             cert_risk_epoch: V16PodU64::new(value.cert_risk_epoch),
             cert_asset_set_epoch: V16PodU64::new(value.cert_asset_set_epoch),
-            active_bitmap_at_cert: V16PodU32::new(value.active_bitmap_at_cert),
+            active_bitmap_at_cert: value.active_bitmap_at_cert.map(V16PodU64::new),
             valid: encode_bool(value.valid),
         }
     }
@@ -2284,7 +2375,7 @@ impl HealthCertV16Account {
             cert_funding_epoch: self.cert_funding_epoch.get(),
             cert_risk_epoch: self.cert_risk_epoch.get(),
             cert_asset_set_epoch: self.cert_asset_set_epoch.get(),
-            active_bitmap_at_cert: self.active_bitmap_at_cert.get(),
+            active_bitmap_at_cert: self.active_bitmap_at_cert.map(|v| v.get()),
             valid: decode_bool(self.valid)?,
         };
         validate_non_min_i128(out.certified_equity)?;
@@ -2299,7 +2390,8 @@ pub struct CloseProgressLedgerV16Account {
     pub finalized: u8,
     pub canceled: u8,
     pub close_id: V16PodU64,
-    pub asset_index: u8,
+    pub asset_index: V16PodU16,
+    pub market_id: V16PodU64,
     pub domain_side: u8,
     pub gross_loss_at_close_start: V16PodU128,
     pub drift_reference_slot: V16PodU64,
@@ -2321,7 +2413,8 @@ impl CloseProgressLedgerV16Account {
             finalized: encode_bool(value.finalized),
             canceled: encode_bool(value.canceled),
             close_id: V16PodU64::new(value.close_id),
-            asset_index: value.asset_index,
+            asset_index: V16PodU16::new(value.asset_index),
+            market_id: V16PodU64::new(value.market_id),
             domain_side: encode_side(value.domain_side),
             gross_loss_at_close_start: V16PodU128::new(value.gross_loss_at_close_start),
             drift_reference_slot: V16PodU64::new(value.drift_reference_slot),
@@ -2343,7 +2436,8 @@ impl CloseProgressLedgerV16Account {
             finalized: decode_bool(self.finalized)?,
             canceled: decode_bool(self.canceled)?,
             close_id: self.close_id.get(),
-            asset_index: self.asset_index,
+            asset_index: self.asset_index.get(),
+            market_id: self.market_id.get(),
             domain_side: decode_side(self.domain_side)?,
             gross_loss_at_close_start: self.gross_loss_at_close_start.get(),
             drift_reference_slot: self.drift_reference_slot.get(),
@@ -2441,13 +2535,14 @@ impl ResolvedPayoutReceiptV16Account {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct PortfolioAccountV16Account {
     pub provenance_header: ProvenanceHeaderV16Account,
     pub owner: [u8; 32],
     pub capital: V16PodU128,
     pub pnl: V16PodI128,
     pub reserved_pnl: V16PodU128,
+    pub source_claim_market_id: [V16PodU64; V16_DOMAIN_COUNT],
     pub source_claim_bound_num: [V16PodU128; V16_DOMAIN_COUNT],
     pub source_claim_liened_num: [V16PodU128; V16_DOMAIN_COUNT],
     pub source_claim_counterparty_liened_num: [V16PodU128; V16_DOMAIN_COUNT],
@@ -2460,7 +2555,7 @@ pub struct PortfolioAccountV16Account {
     pub fee_credits: V16PodI128,
     pub cancel_deposit_escrow: V16PodU128,
     pub last_fee_slot: V16PodU64,
-    pub active_bitmap: V16PodU32,
+    pub active_bitmap: [V16PodU64; V16_ACTIVE_BITMAP_WORDS],
     pub legs: [PortfolioLegV16Account; V16_MAX_PORTFOLIO_ASSETS_N],
     pub health_cert: HealthCertV16Account,
     pub stale_state: u8,
@@ -2469,6 +2564,12 @@ pub struct PortfolioAccountV16Account {
     pub liquidation_lock: u8,
     pub close_progress: CloseProgressLedgerV16Account,
     pub resolved_payout_receipt: ResolvedPayoutReceiptV16Account,
+}
+
+impl Default for PortfolioAccountV16Account {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
 }
 
 impl PortfolioAccountV16Account {
@@ -2493,6 +2594,7 @@ impl PortfolioAccountV16Account {
             capital: V16PodU128::new(value.capital),
             pnl: V16PodI128::new(value.pnl),
             reserved_pnl: V16PodU128::new(value.reserved_pnl),
+            source_claim_market_id: value.source_claim_market_id.map(V16PodU64::new),
             source_claim_bound_num: value.source_claim_bound_num.map(V16PodU128::new),
             source_claim_liened_num: value.source_claim_liened_num.map(V16PodU128::new),
             source_claim_counterparty_liened_num: value
@@ -2517,7 +2619,7 @@ impl PortfolioAccountV16Account {
             fee_credits: V16PodI128::new(value.fee_credits),
             cancel_deposit_escrow: V16PodU128::new(value.cancel_deposit_escrow),
             last_fee_slot: V16PodU64::new(value.last_fee_slot),
-            active_bitmap: V16PodU32::new(value.active_bitmap),
+            active_bitmap: value.active_bitmap.map(V16PodU64::new),
             legs,
             health_cert: HealthCertV16Account::from_runtime(&value.health_cert),
             stale_state: encode_bool(value.stale_state),
@@ -2545,6 +2647,7 @@ impl PortfolioAccountV16Account {
             capital: self.capital.get(),
             pnl: self.pnl.get(),
             reserved_pnl: self.reserved_pnl.get(),
+            source_claim_market_id: self.source_claim_market_id.map(|v| v.get()),
             source_claim_bound_num: self.source_claim_bound_num.map(|v| v.get()),
             source_claim_liened_num: self.source_claim_liened_num.map(|v| v.get()),
             source_claim_counterparty_liened_num: self
@@ -2567,7 +2670,7 @@ impl PortfolioAccountV16Account {
             fee_credits: self.fee_credits.get(),
             cancel_deposit_escrow: self.cancel_deposit_escrow.get(),
             last_fee_slot: self.last_fee_slot.get(),
-            active_bitmap: self.active_bitmap.get(),
+            active_bitmap: self.active_bitmap.map(|v| v.get()),
             legs,
             health_cert: self.health_cert.try_to_runtime()?,
             stale_state: decode_bool(self.stale_state)?,
@@ -2639,7 +2742,7 @@ impl PortfolioAccountV16Account {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct MarketGroupV16Account {
     pub market_group_id: [u8; 32],
     pub config: V16ConfigAccount,
@@ -2664,6 +2767,7 @@ pub struct MarketGroupV16Account {
     pub asset_set_epoch: V16PodU64,
     pub asset_activation_count: V16PodU64,
     pub last_asset_activation_slot: V16PodU64,
+    pub next_market_id: V16PodU64,
     pub oracle_epoch: V16PodU64,
     pub funding_epoch: V16PodU64,
     pub slot_last: V16PodU64,
@@ -2679,6 +2783,12 @@ pub struct MarketGroupV16Account {
     pub payout_snapshot_pnl_pos_tot: V16PodU128,
     pub payout_snapshot_captured: u8,
     pub resolved_payout_ledger: ResolvedPayoutLedgerV16Account,
+}
+
+impl Default for MarketGroupV16Account {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
 }
 
 impl MarketGroupV16Account {
@@ -2734,6 +2844,7 @@ impl MarketGroupV16Account {
             asset_set_epoch: V16PodU64::new(value.asset_set_epoch),
             asset_activation_count: V16PodU64::new(value.asset_activation_count),
             last_asset_activation_slot: V16PodU64::new(value.last_asset_activation_slot),
+            next_market_id: V16PodU64::new(value.next_market_id),
             oracle_epoch: V16PodU64::new(value.oracle_epoch),
             funding_epoch: V16PodU64::new(value.funding_epoch),
             slot_last: V16PodU64::new(value.slot_last),
@@ -2804,6 +2915,7 @@ impl MarketGroupV16Account {
             asset_set_epoch: self.asset_set_epoch.get(),
             asset_activation_count: self.asset_activation_count.get(),
             last_asset_activation_slot: self.last_asset_activation_slot.get(),
+            next_market_id: self.next_market_id.get(),
             oracle_epoch: self.oracle_epoch.get(),
             funding_epoch: self.funding_epoch.get(),
             slot_last: self.slot_last.get(),
@@ -2834,6 +2946,19 @@ impl MarketGroupV16 {
     #[cfg(not(target_os = "solana"))]
     pub fn new(market_group_id: [u8; 32], config: V16Config) -> V16Result<Self> {
         config.validate_public_user_fund()?;
+        let n = config.max_portfolio_assets as usize;
+        let mut assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut i = 0usize;
+        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+            if i < n {
+                assets[i].market_id = (i as u64).checked_add(1).ok_or(V16Error::CounterOverflow)?;
+            } else {
+                assets[i].lifecycle = AssetLifecycleV16::Disabled;
+                assets[i].market_id = 0;
+            }
+            i += 1;
+        }
+        let next_market_id = (n as u64).checked_add(1).ok_or(V16Error::CounterOverflow)?;
         Ok(Self {
             market_group_id,
             config,
@@ -2858,11 +2983,12 @@ impl MarketGroupV16 {
             asset_set_epoch: 0,
             asset_activation_count: 0,
             last_asset_activation_slot: 0,
+            next_market_id,
             oracle_epoch: 0,
             funding_epoch: 0,
             slot_last: 0,
             current_slot: 0,
-            assets: [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N],
+            assets,
             bankruptcy_hlock_active: false,
             threshold_stress_active: false,
             loss_stale_active: false,
@@ -2913,6 +3039,7 @@ impl MarketGroupV16 {
         }
         if ledger.close_id == 0
             || ledger.asset_index as usize >= self.config.max_portfolio_assets as usize
+            || ledger.market_id != self.assets[ledger.asset_index as usize].market_id
             || ledger.drift_reference_slot > ledger.max_close_slot
             || ledger.max_close_slot < ledger.drift_reference_slot
             || ledger.support_consumed > ledger.junior_face_burned
@@ -2964,7 +3091,7 @@ impl MarketGroupV16 {
 
         let n = self.config.max_portfolio_assets as usize;
         for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
-            let bit = ((account.active_bitmap >> i) & 1) != 0;
+            let bit = active_bitmap_get(account.active_bitmap, i);
             let leg = account.legs[i];
             if i >= n {
                 if bit || leg != PortfolioLegV16::default() {
@@ -2982,6 +3109,16 @@ impl MarketGroupV16 {
                 }
             } else {
                 validate_active_leg(leg)?;
+                if leg.market_id != self.assets[i].market_id
+                    || !matches!(
+                        self.assets[i].lifecycle,
+                        AssetLifecycleV16::Active
+                            | AssetLifecycleV16::DrainOnly
+                            | AssetLifecycleV16::Recovery
+                    )
+                {
+                    return Err(V16Error::HiddenLeg);
+                }
             }
         }
         if account.close_progress.active {
@@ -3035,7 +3172,7 @@ impl MarketGroupV16 {
         let configured_domains = self.config.max_portfolio_assets as usize * 2;
         let mut d = 0;
         while d < V16_DOMAIN_COUNT {
-            let zero_source_domain = account.source_claim_bound_num[d] == 0
+            let numeric_zero_source_domain = account.source_claim_bound_num[d] == 0
                 && account.source_claim_liened_num[d] == 0
                 && account.source_claim_counterparty_liened_num[d] == 0
                 && account.source_claim_insurance_liened_num[d] == 0
@@ -3044,11 +3181,18 @@ impl MarketGroupV16 {
                 && account.source_lien_insurance_backing_num[d] == 0
                 && account.source_claim_impaired_num[d] == 0
                 && account.source_lien_impaired_effective_reserved[d] == 0;
-            if zero_source_domain {
+            if numeric_zero_source_domain {
+                if account.source_claim_market_id[d] != 0 {
+                    return Err(V16Error::HiddenLeg);
+                }
                 d += 1;
                 continue;
             }
             if d >= configured_domains {
+                return Err(V16Error::HiddenLeg);
+            }
+            let asset_index = d / 2;
+            if account.source_claim_market_id[d] != self.assets[asset_index].market_id {
                 return Err(V16Error::HiddenLeg);
             }
             self.source_credit_lien_proof_for_account_domain(account, d)?
@@ -3136,7 +3280,7 @@ impl MarketGroupV16 {
 
     pub fn close_portfolio_account(&mut self, account: &PortfolioAccountV16) -> V16Result<()> {
         self.validate_account_shape(account)?;
-        if account.active_bitmap != 0
+        if !active_bitmap_is_empty(account.active_bitmap)
             || account.capital != 0
             || account.pnl != 0
             || account.reserved_pnl != 0
@@ -3497,7 +3641,7 @@ impl MarketGroupV16 {
         if now_slot < account.last_fee_slot {
             return Err(V16Error::Stale);
         }
-        let nonflat = account.active_bitmap != 0;
+        let nonflat = !active_bitmap_is_empty(account.active_bitmap);
         let fee_anchor = if self.mode == MarketModeV16::Live && nonflat && now_slot > self.slot_last
         {
             self.slot_last
@@ -3563,7 +3707,6 @@ impl MarketGroupV16 {
                 )?,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
-                domain_effective_consumed: [0; V16_DOMAIN_COUNT],
             }
         };
         let face_i128 =
@@ -3617,10 +3760,12 @@ impl MarketGroupV16 {
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
         let locked = self.h_lock_lane(Some(account), false)? == HLockLaneV16::HMax;
-        if self.loss_stale_active && account.active_bitmap != 0 {
+        if self.loss_stale_active && !active_bitmap_is_empty(account.active_bitmap) {
             return Err(V16Error::LockActive);
         }
-        if self.account_has_target_effective_lag(account)? && account.active_bitmap != 0 {
+        if self.account_has_target_effective_lag(account)?
+            && !active_bitmap_is_empty(account.active_bitmap)
+        {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal(account)?;
@@ -3700,6 +3845,7 @@ impl MarketGroupV16 {
                 account.source_lien_effective_reserved[d] = 0;
                 account.source_lien_counterparty_backing_num[d] = 0;
                 account.source_lien_insurance_backing_num[d] = 0;
+                Self::clear_account_source_claim_market_id_if_empty(account, d);
             }
             d += 1;
         }
@@ -3872,14 +4018,23 @@ impl MarketGroupV16 {
         }
     }
 
-    pub fn retire_empty_asset_not_atomic(&mut self, asset_index: usize) -> V16Result<()> {
+    pub fn retire_empty_asset_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
+        if now_slot < self.current_slot {
+            return Err(V16Error::Stale);
+        }
         match self.assets[asset_index].lifecycle {
             AssetLifecycleV16::Active
             | AssetLifecycleV16::DrainOnly
             | AssetLifecycleV16::Recovery => {
                 self.require_empty_asset_lifecycle_state(asset_index)?;
                 self.assets[asset_index].lifecycle = AssetLifecycleV16::Retired;
+                self.assets[asset_index].retired_slot = now_slot;
+                self.current_slot = now_slot;
                 self.bump_asset_set_epoch()?;
                 self.assert_public_invariants()
             }
@@ -3915,19 +4070,37 @@ impl MarketGroupV16 {
                 return Err(V16Error::LockActive);
             }
         }
-        match self.assets[asset_index].lifecycle {
-            AssetLifecycleV16::Disabled | AssetLifecycleV16::Retired => {}
+        let previous_asset = self.assets[asset_index];
+        match previous_asset.lifecycle {
+            AssetLifecycleV16::Disabled => {}
+            AssetLifecycleV16::Retired => {
+                if previous_asset.retired_slot == 0 {
+                    return Err(V16Error::LockActive);
+                }
+                let elapsed = now_slot
+                    .checked_sub(previous_asset.retired_slot)
+                    .ok_or(V16Error::Stale)?;
+                if elapsed < self.config.asset_activation_cooldown_slots {
+                    return Err(V16Error::LockActive);
+                }
+            }
             _ => return Err(V16Error::LockActive),
         }
         self.config.validate_public_user_fund()?;
         self.require_empty_asset_lifecycle_state(asset_index)?;
         let mut asset = AssetStateV16::default();
+        asset.market_id = self.next_market_id;
+        asset.retired_slot = 0;
         asset.lifecycle = AssetLifecycleV16::Active;
         asset.raw_oracle_target_price = authenticated_price;
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
         self.assets[asset_index] = asset;
+        self.next_market_id = self
+            .next_market_id
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
         self.current_slot = now_slot;
         self.asset_activation_count = self
             .asset_activation_count
@@ -3953,7 +4126,8 @@ impl MarketGroupV16 {
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
             return Err(V16Error::LockActive);
         }
-        if account.legs[asset_index].active || ((account.active_bitmap >> asset_index) & 1) != 0 {
+        if account.legs[asset_index].active || active_bitmap_get(account.active_bitmap, asset_index)
+        {
             return Err(V16Error::InvalidLeg);
         }
         validate_basis(basis_pos_q)?;
@@ -4016,6 +4190,7 @@ impl MarketGroupV16 {
         }
         account.legs[asset_index] = PortfolioLegV16 {
             active: true,
+            market_id: asset.market_id,
             side,
             basis_pos_q,
             a_basis,
@@ -4029,7 +4204,7 @@ impl MarketGroupV16 {
             b_stale: false,
             stale: false,
         };
-        account.active_bitmap |= 1u32 << asset_index;
+        active_bitmap_set(&mut account.active_bitmap, asset_index)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -4140,7 +4315,7 @@ impl MarketGroupV16 {
             }
         }
         account.legs[asset_index] = PortfolioLegV16::EMPTY;
-        account.active_bitmap &= !(1u32 << asset_index);
+        active_bitmap_clear(&mut account.active_bitmap, asset_index)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -4467,11 +4642,8 @@ impl MarketGroupV16 {
             self.settle_leg_kf_effects(account, i)?;
             if self.b_target_for_leg(i, account.legs[i])? > account.legs[i].b_snap {
                 self.mark_leg_b_stale(account, i)?;
-                let chunk = self.settle_account_b_chunk(
-                    account,
-                    i,
-                    self.config.public_b_chunk_atoms,
-                )?;
+                let chunk =
+                    self.settle_account_b_chunk(account, i, self.config.public_b_chunk_atoms)?;
                 if chunk.remaining_after != 0 {
                     return Err(V16Error::BStale);
                 }
@@ -4733,8 +4905,7 @@ impl MarketGroupV16 {
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
         let long_old_abs = signed_position(long_account.legs[request.asset_index]).unsigned_abs();
-        let short_old_abs =
-            signed_position(short_account.legs[request.asset_index]).unsigned_abs();
+        let short_old_abs = signed_position(short_account.legs[request.asset_index]).unsigned_abs();
         self.charge_account_fee_current_not_atomic(long_account, fee)?;
         self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
@@ -4822,11 +4993,11 @@ impl MarketGroupV16 {
             0
         };
         let remaining_active_bitmap = if close_q == leg.basis_pos_q.unsigned_abs() {
-            account.active_bitmap & !(1u32 << request.asset_index)
+            active_bitmap_with_cleared(account.active_bitmap, request.asset_index)?
         } else {
             account.active_bitmap
         };
-        if uncovered_loss_after_principal != 0 && remaining_active_bitmap != 0 {
+        if uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap) {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -5171,7 +5342,7 @@ impl MarketGroupV16 {
             self.assert_public_invariants()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        if account.active_bitmap != 0
+        if !active_bitmap_is_empty(account.active_bitmap)
             || account.pnl < 0
             || account.b_stale_state
             || account.stale_state
@@ -5320,7 +5491,8 @@ impl MarketGroupV16 {
             active: true,
             finalized: false,
             close_id,
-            asset_index: u8::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
+            asset_index: u16::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
+            market_id: self.assets[asset_index].market_id,
             domain_side,
             gross_loss_at_close_start: gross_loss,
             drift_reference_slot: self.current_slot,
@@ -5673,7 +5845,7 @@ impl MarketGroupV16 {
             }
         }
         account.legs[asset_index] = PortfolioLegV16::EMPTY;
-        account.active_bitmap &= !(1u32 << asset_index);
+        active_bitmap_clear(&mut account.active_bitmap, asset_index)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -5917,7 +6089,7 @@ impl MarketGroupV16 {
             unsettled_b_loss_bound: account_b_loss_bound(account)?,
             stale_loss_bound: if account.stale_state { 1 } else { 0 },
             gross_risk_notional: account.health_cert.certified_worst_case_loss,
-            active_leg_count: account.active_bitmap.count_ones(),
+            active_leg_count: active_bitmap_count_ones(account.active_bitmap),
         })
     }
 
@@ -6028,6 +6200,9 @@ impl MarketGroupV16 {
         } else if self.last_asset_activation_slot > self.current_slot {
             return Err(V16Error::InvalidConfig);
         }
+        if self.next_market_id == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
         let mut d = 0;
         while d < V16_DOMAIN_COUNT {
             if self.insurance_domain_spent[d] > self.insurance_domain_budget[d] {
@@ -6071,6 +6246,23 @@ impl MarketGroupV16 {
         }
         for i in 0..self.config.max_portfolio_assets as usize {
             let asset = self.assets[i];
+            if matches!(asset.lifecycle, AssetLifecycleV16::Disabled) {
+                if asset.market_id != 0 {
+                    return Err(V16Error::InvalidConfig);
+                }
+            } else {
+                if asset.market_id == 0 || asset.market_id >= self.next_market_id {
+                    return Err(V16Error::InvalidConfig);
+                }
+                let mut j = 0usize;
+                while j < i {
+                    if self.assets[j].market_id != 0 && self.assets[j].market_id == asset.market_id
+                    {
+                        return Err(V16Error::InvalidConfig);
+                    }
+                    j += 1;
+                }
+            }
             let requires_price = matches!(
                 asset.lifecycle,
                 AssetLifecycleV16::Active
@@ -6112,6 +6304,18 @@ impl MarketGroupV16 {
                 || asset.social_loss_dust_short_num >= SOCIAL_LOSS_DEN
             {
                 return Err(V16Error::InvalidConfig);
+            }
+            match asset.lifecycle {
+                AssetLifecycleV16::Retired => {
+                    if asset.retired_slot == 0 || asset.retired_slot > self.current_slot {
+                        return Err(V16Error::InvalidConfig);
+                    }
+                }
+                _ => {
+                    if asset.retired_slot != 0 {
+                        return Err(V16Error::InvalidConfig);
+                    }
+                }
             }
             if matches!(
                 asset.lifecycle,
@@ -6545,6 +6749,44 @@ impl MarketGroupV16 {
             .ok_or(V16Error::CounterUnderflow)
     }
 
+    fn ensure_account_source_claim_market_id(
+        &self,
+        account: &mut PortfolioAccountV16,
+        domain: usize,
+    ) -> V16Result<()> {
+        let (asset_index, _) = self.source_domain_asset_side(domain)?;
+        let market_id = self.assets[asset_index].market_id;
+        if market_id == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        if account.source_claim_market_id[domain] == 0 {
+            account.source_claim_market_id[domain] = market_id;
+            return Ok(());
+        }
+        if account.source_claim_market_id[domain] != market_id {
+            return Err(V16Error::HiddenLeg);
+        }
+        Ok(())
+    }
+
+    fn clear_account_source_claim_market_id_if_empty(
+        account: &mut PortfolioAccountV16,
+        domain: usize,
+    ) {
+        if account.source_claim_bound_num[domain] == 0
+            && account.source_claim_liened_num[domain] == 0
+            && account.source_claim_counterparty_liened_num[domain] == 0
+            && account.source_claim_insurance_liened_num[domain] == 0
+            && account.source_lien_effective_reserved[domain] == 0
+            && account.source_lien_counterparty_backing_num[domain] == 0
+            && account.source_lien_insurance_backing_num[domain] == 0
+            && account.source_claim_impaired_num[domain] == 0
+            && account.source_lien_impaired_effective_reserved[domain] == 0
+        {
+            account.source_claim_market_id[domain] = 0;
+        }
+    }
+
     fn valid_source_lien_effective_reserved_sum(account: &PortfolioAccountV16) -> V16Result<u128> {
         let mut sum = 0u128;
         let mut d = 0;
@@ -6768,14 +7010,12 @@ impl MarketGroupV16 {
                 face_burn: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
-                domain_effective_consumed: [0; V16_DOMAIN_COUNT],
             });
         }
         let mut remaining = effective_credit;
         let mut face_burn_num = 0u128;
         let mut counterparty_credit_consumed = 0u128;
         let mut insurance_credit_consumed = 0u128;
-        let mut domain_effective_consumed = [0u128; V16_DOMAIN_COUNT];
         let mut d = 0;
         while d < V16_DOMAIN_COUNT && remaining != 0 {
             if d >= self.config.max_portfolio_assets as usize * 2 {
@@ -6832,9 +7072,6 @@ impl MarketGroupV16 {
                     face_burn_num = face_burn_num
                         .checked_add(face_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
-                    domain_effective_consumed[d] = domain_effective_consumed[d]
-                        .checked_add(take)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
                     remaining -= take;
                 }
             }
@@ -6847,7 +7084,6 @@ impl MarketGroupV16 {
             face_burn: Self::amount_from_bound_num(face_burn_num)?,
             counterparty_credit_consumed,
             insurance_credit_consumed,
-            domain_effective_consumed,
         })
     }
 
@@ -7500,7 +7736,6 @@ impl MarketGroupV16 {
                 face_burn: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
-                domain_effective_consumed: [0; V16_DOMAIN_COUNT],
             });
         }
         self.validate_source_domain_ledger_current(domain)?;
@@ -7543,11 +7778,6 @@ impl MarketGroupV16 {
             face_burn: Self::amount_from_bound_num(required_face_num)?,
             counterparty_credit_consumed,
             insurance_credit_consumed,
-            domain_effective_consumed: {
-                let mut consumed = [0u128; V16_DOMAIN_COUNT];
-                consumed[domain] = effective_credit;
-                consumed
-            },
         })
     }
 
@@ -8561,6 +8791,7 @@ impl MarketGroupV16 {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             if increase_num != 0 {
                 if let Some(domain) = source_domain {
+                    self.ensure_account_source_claim_market_id(account, domain)?;
                     account.source_claim_bound_num[domain] = account.source_claim_bound_num[domain]
                         .checked_add(increase_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
@@ -8645,6 +8876,7 @@ impl MarketGroupV16 {
                     .checked_sub(burn.min(self.source_credit[d].exact_positive_claim_num))
                     .ok_or(V16Error::CounterUnderflow)?;
                 burn_num -= burn;
+                Self::clear_account_source_claim_market_id_if_empty(account, d);
                 self.recompute_source_credit_domain_after_mutation(d)?;
             }
             d += 1;
