@@ -18,6 +18,12 @@ use crate::{
 };
 
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
+/// Fixed in-memory aggregate width used by the no-alloc runtime/proof harness.
+///
+/// Dynamic wrapper storage is not capped by this value. Wrapper-backed markets
+/// use `MarketGroupV16HeaderAccount` plus a runtime-sized trailing asset-slot
+/// table; this fixed aggregate exists for small-scope production-code proofs
+/// and tests that need an owned `MarketGroupV16` value.
 pub const V16_MAX_MARKET_SLOTS_N: usize = 64;
 pub const V16_ACTIVE_BITMAP_WORDS: usize = (V16_MAX_PORTFOLIO_ASSETS_N + 63) / 64;
 pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
@@ -26,6 +32,14 @@ pub const V16_DOMAIN_COUNT: usize = V16_MAX_MARKET_SLOTS_N * 2;
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 16;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
+
+#[inline]
+fn validate_fixed_runtime_market_capacity(max_market_slots: u32) -> V16Result<()> {
+    if max_market_slots as usize > V16_MAX_MARKET_SLOTS_N {
+        return Err(V16Error::InvalidConfig);
+    }
+    Ok(())
+}
 
 #[inline]
 fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, usize)> {
@@ -671,7 +685,6 @@ impl V16Config {
         if self.max_portfolio_assets == 0
             || self.max_portfolio_assets as usize > V16_MAX_PORTFOLIO_ASSETS_N
             || self.max_market_slots == 0
-            || self.max_market_slots as usize > V16_MAX_MARKET_SLOTS_N
             || self.max_portfolio_assets as u32 > self.max_market_slots
         {
             return Err(V16Error::InvalidConfig);
@@ -1029,7 +1042,7 @@ pub struct CloseProgressLedgerV16 {
     pub finalized: bool,
     pub canceled: bool,
     pub close_id: u64,
-    pub asset_index: u16,
+    pub asset_index: u32,
     pub market_id: u64,
     pub domain_side: SideV16,
     pub gross_loss_at_close_start: u128,
@@ -2594,6 +2607,55 @@ impl MarketGroupV16HeaderAccount {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    pub fn new_dynamic(
+        market_group_id: [u8; 32],
+        config: V16Config,
+        asset_slot_capacity: u32,
+        init_slot: u64,
+    ) -> V16Result<Self> {
+        if asset_slot_capacity < config.max_market_slots {
+            return Err(V16Error::InvalidConfig);
+        }
+        config.validate_public_user_fund()?;
+        Ok(Self {
+            market_group_id,
+            config: V16ConfigAccount::from_runtime(&config),
+            asset_slot_capacity: V16PodU32::new(asset_slot_capacity),
+            vault: V16PodU128::default(),
+            insurance: V16PodU128::default(),
+            c_tot: V16PodU128::default(),
+            pnl_pos_tot: V16PodU128::default(),
+            pnl_pos_bound_tot_num: V16PodU128::default(),
+            pnl_pos_bound_tot: V16PodU128::default(),
+            pnl_matured_pos_tot: V16PodU128::default(),
+            materialized_portfolio_count: V16PodU64::default(),
+            stale_certificate_count: V16PodU64::default(),
+            b_stale_account_count: V16PodU64::default(),
+            negative_pnl_account_count: V16PodU64::default(),
+            risk_epoch: V16PodU64::default(),
+            asset_set_epoch: V16PodU64::default(),
+            asset_activation_count: V16PodU64::default(),
+            last_asset_activation_slot: V16PodU64::default(),
+            next_market_id: V16PodU64::new(1),
+            oracle_epoch: V16PodU64::default(),
+            funding_epoch: V16PodU64::default(),
+            slot_last: V16PodU64::new(init_slot),
+            current_slot: V16PodU64::new(init_slot),
+            bankruptcy_hlock_active: 0,
+            threshold_stress_active: 0,
+            loss_stale_active: 0,
+            recovery_reason: V16OptionalRecoveryReasonAccount::default(),
+            mode: encode_market_mode(MarketModeV16::Live),
+            resolved_slot: V16PodU64::default(),
+            payout_snapshot: V16PodU128::default(),
+            payout_snapshot_pnl_pos_tot: V16PodU128::default(),
+            payout_snapshot_captured: 0,
+            resolved_payout_ledger: ResolvedPayoutLedgerV16Account::from_runtime(
+                &ResolvedPayoutLedgerV16::EMPTY,
+            ),
+        })
+    }
+
     pub fn grow_asset_slot_capacity_not_atomic(
         &mut self,
         new_asset_slot_capacity: u32,
@@ -2603,7 +2665,6 @@ impl MarketGroupV16HeaderAccount {
         let old_capacity = self.asset_slot_capacity.get();
         if decode_market_mode(self.mode)? != MarketModeV16::Live
             || new_asset_slot_capacity < old_capacity
-            || new_asset_slot_capacity as usize > V16_MAX_MARKET_SLOTS_N
             || new_max_market_slots < config.max_market_slots
             || new_max_market_slots > new_asset_slot_capacity
         {
@@ -2633,7 +2694,9 @@ impl MarketGroupV16HeaderAccount {
         value: &MarketGroupV16,
         asset_slot_capacity: usize,
     ) -> V16Result<Self> {
+        validate_fixed_runtime_market_capacity(value.config.max_market_slots)?;
         if asset_slot_capacity > u32::MAX as usize
+            || asset_slot_capacity > V16_MAX_MARKET_SLOTS_N
             || asset_slot_capacity < value.config.max_market_slots as usize
         {
             return Err(V16Error::InvalidConfig);
@@ -3010,7 +3073,7 @@ pub struct CloseProgressLedgerV16Account {
     pub finalized: u8,
     pub canceled: u8,
     pub close_id: V16PodU64,
-    pub asset_index: V16PodU16,
+    pub asset_index: V16PodU32,
     pub market_id: V16PodU64,
     pub domain_side: u8,
     pub gross_loss_at_close_start: V16PodU128,
@@ -3033,7 +3096,7 @@ impl CloseProgressLedgerV16Account {
             finalized: encode_bool(value.finalized),
             canceled: encode_bool(value.canceled),
             close_id: V16PodU64::new(value.close_id),
-            asset_index: V16PodU16::new(value.asset_index),
+            asset_index: V16PodU32::new(value.asset_index),
             market_id: V16PodU64::new(value.market_id),
             domain_side: encode_side(value.domain_side),
             gross_loss_at_close_start: V16PodU128::new(value.gross_loss_at_close_start),
@@ -3524,6 +3587,7 @@ impl MarketGroupV16 {
     #[cfg(not(target_os = "solana"))]
     pub fn new(market_group_id: [u8; 32], config: V16Config) -> V16Result<Self> {
         config.validate_public_user_fund()?;
+        validate_fixed_runtime_market_capacity(config.max_market_slots)?;
         let n = config.max_market_slots as usize;
         let mut assets = [AssetStateV16::default(); V16_MAX_MARKET_SLOTS_N];
         let mut source_backing_buckets = [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT];
@@ -6165,7 +6229,7 @@ impl MarketGroupV16 {
             active: true,
             finalized: false,
             close_id,
-            asset_index: u16::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
+            asset_index: u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
             market_id: self.assets[asset_index].market_id,
             domain_side,
             gross_loss_at_close_start: gross_loss,
@@ -6833,6 +6897,7 @@ impl MarketGroupV16 {
     }
 
     pub fn assert_public_invariants(&self) -> V16Result<()> {
+        validate_fixed_runtime_market_capacity(self.config.max_market_slots)?;
         if self.vault > MAX_VAULT_TVL {
             return Err(V16Error::InvalidConfig);
         }
@@ -9969,9 +10034,6 @@ fn validate_basis(basis_pos_q: i128) -> V16Result<()> {
 fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
     validate_non_min_i128(leg.k_snap)?;
     validate_non_min_i128(leg.f_snap)?;
-    if leg.asset_index as usize >= V16_MAX_MARKET_SLOTS_N {
-        return Err(V16Error::InvalidLeg);
-    }
     let current_loss_weight = if leg.basis_pos_q == 0 {
         0
     } else {

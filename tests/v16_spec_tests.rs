@@ -2799,6 +2799,43 @@ fn v16_dynamic_header_can_grow_and_activate_appended_market_slot() {
 }
 
 #[test]
+fn v16_dynamic_header_capacity_is_wrapper_supplied_not_fixed_runtime_window() {
+    let capacity = V16_MAX_MARKET_SLOTS_N as u32 + 25;
+    let config = V16Config::public_user_fund_with_market_slots(4, 16, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(ids().0, config, 16, 0).unwrap();
+
+    header
+        .grow_asset_slot_capacity_not_atomic(capacity, capacity)
+        .unwrap();
+    let mut appended_slot = EngineAssetSlotV16Account::default();
+    let asset_index = capacity - 1;
+    let next_market_id = header.next_market_id.get();
+
+    header
+        .activate_empty_asset_slot_not_atomic(asset_index, &mut appended_slot, 456, 0)
+        .unwrap();
+
+    let grown = header.config.try_to_runtime().unwrap();
+    assert_eq!(grown.max_market_slots, capacity);
+    assert_eq!(header.asset_slot_capacity.get(), capacity);
+    assert_eq!(appended_slot.asset.market_id.get(), next_market_id);
+    assert_eq!(appended_slot.asset.effective_price.get(), 456);
+    assert_eq!(appended_slot.backing_long.market_id.get(), next_market_id);
+    assert_eq!(appended_slot.backing_short.market_id.get(), next_market_id);
+}
+
+#[test]
+fn v16_fixed_runtime_aggregate_rejects_capacity_above_internal_window() {
+    let config =
+        V16Config::public_user_fund_with_market_slots(4, V16_MAX_MARKET_SLOTS_N as u32 + 1, 0, 10);
+    assert_eq!(config.validate_public_user_fund_shape(), Ok(()));
+    assert_eq!(
+        MarketGroupV16::new(ids().0, config),
+        Err(V16Error::InvalidConfig)
+    );
+}
+
+#[test]
 fn v16_bilateral_oi_decomposition_counts_only_active_side_exposure() {
     let mut g = group();
     let mut long = account();

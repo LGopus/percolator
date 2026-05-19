@@ -3323,10 +3323,10 @@ fn proof_v16_config_separates_active_leg_and_market_slot_caps() {
         Err(V16Error::InvalidConfig)
     );
 
-    let too_many_market_slots = V16Config::public_user_fund_with_market_slots(4, 65, 0, 1);
+    let expanded_market_slots = V16Config::public_user_fund_with_market_slots(4, 65, 0, 1);
     assert_eq!(
-        too_many_market_slots.validate_public_user_fund_shape(),
-        Err(V16Error::InvalidConfig)
+        expanded_market_slots.validate_public_user_fund_shape(),
+        Ok(())
     );
 }
 
@@ -3598,8 +3598,13 @@ fn proof_v16_dynamic_header_activation_binds_backing_to_new_market_id() {
     let nonempty: bool = kani::any();
     let price = 7u64;
     let (market, _, _) = concrete_ids();
-    let group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&group, 1).unwrap();
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(
+        market,
+        V16Config::public_user_fund_with_market_slots(1, 1, 0, 1),
+        1,
+        0,
+    )
+    .unwrap();
     let mut slot = EngineAssetSlotV16Account::default();
     if nonempty {
         slot.asset.oi_eff_long_q = percolator::v16::V16PodU128::new(1);
@@ -3608,8 +3613,7 @@ fn proof_v16_dynamic_header_activation_binds_backing_to_new_market_id() {
     }
     let market_id = header.next_market_id.get();
 
-    let result =
-        header.activate_empty_asset_slot_not_atomic(0, &mut slot, price, group.current_slot);
+    let result = header.activate_empty_asset_slot_not_atomic(0, &mut slot, price, 0);
 
     kani::cover!(
         price == 7,
