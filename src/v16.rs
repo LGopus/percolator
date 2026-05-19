@@ -76,33 +76,33 @@ pub fn active_bitmap_is_empty(bitmap: V16ActiveBitmap) -> bool {
 }
 
 #[inline]
-pub fn active_bitmap_get(bitmap: V16ActiveBitmap, asset_index: usize) -> bool {
-    if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+pub fn active_bitmap_get(bitmap: V16ActiveBitmap, leg_slot_index: usize) -> bool {
+    if leg_slot_index >= V16_MAX_PORTFOLIO_ASSETS_N {
         return false;
     }
-    let word = asset_index / 64;
-    let bit = asset_index % 64;
+    let word = leg_slot_index / 64;
+    let bit = leg_slot_index % 64;
     ((bitmap[word] >> bit) & 1) != 0
 }
 
 #[inline]
-pub fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, asset_index: usize) -> V16Result<()> {
-    if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+pub fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16Result<()> {
+    if leg_slot_index >= V16_MAX_PORTFOLIO_ASSETS_N {
         return Err(V16Error::InvalidConfig);
     }
-    let word = asset_index / 64;
-    let bit = asset_index % 64;
+    let word = leg_slot_index / 64;
+    let bit = leg_slot_index % 64;
     bitmap[word] |= 1u64 << bit;
     Ok(())
 }
 
 #[inline]
-pub fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, asset_index: usize) -> V16Result<()> {
-    if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+pub fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16Result<()> {
+    if leg_slot_index >= V16_MAX_PORTFOLIO_ASSETS_N {
         return Err(V16Error::InvalidConfig);
     }
-    let word = asset_index / 64;
-    let bit = asset_index % 64;
+    let word = leg_slot_index / 64;
+    let bit = leg_slot_index % 64;
     bitmap[word] &= !(1u64 << bit);
     Ok(())
 }
@@ -110,9 +110,9 @@ pub fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, asset_index: usize) -> 
 #[inline]
 pub fn active_bitmap_with_cleared(
     mut bitmap: V16ActiveBitmap,
-    asset_index: usize,
+    leg_slot_index: usize,
 ) -> V16Result<V16ActiveBitmap> {
-    active_bitmap_clear(&mut bitmap, asset_index)?;
+    active_bitmap_clear(&mut bitmap, leg_slot_index)?;
     Ok(bitmap)
 }
 
@@ -944,6 +944,7 @@ pub struct EngineAssetSlotWithExtV16Account<WrapperExt> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortfolioLegV16 {
     pub active: bool,
+    pub asset_index: u32,
     pub market_id: u64,
     pub side: SideV16,
     pub basis_pos_q: i128,
@@ -962,6 +963,7 @@ pub struct PortfolioLegV16 {
 impl PortfolioLegV16 {
     pub const EMPTY: Self = Self {
         active: false,
+        asset_index: 0,
         market_id: 0,
         side: SideV16::Long,
         basis_pos_q: 0,
@@ -2828,6 +2830,7 @@ impl MarketGroupV16HeaderAccount {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct PortfolioLegV16Account {
     pub active: u8,
+    pub asset_index: V16PodU32,
     pub market_id: V16PodU64,
     pub side: u8,
     pub basis_pos_q: V16PodI128,
@@ -2847,6 +2850,7 @@ impl PortfolioLegV16Account {
     pub fn from_runtime(value: &PortfolioLegV16) -> Self {
         Self {
             active: encode_bool(value.active),
+            asset_index: V16PodU32::new(value.asset_index),
             market_id: V16PodU64::new(value.market_id),
             side: encode_side(value.side),
             basis_pos_q: V16PodI128::new(value.basis_pos_q),
@@ -2866,6 +2870,7 @@ impl PortfolioLegV16Account {
     pub fn try_to_runtime(&self) -> V16Result<PortfolioLegV16> {
         let out = PortfolioLegV16 {
             active: decode_bool(self.active)?,
+            asset_index: self.asset_index.get(),
             market_id: self.market_id.get(),
             side: decode_side(self.side)?,
             basis_pos_q: self.basis_pos_q.get(),
@@ -3612,16 +3617,10 @@ impl MarketGroupV16 {
         self.validate_resolved_payout_receipt(account.resolved_payout_receipt)?;
 
         let n = self.config.max_portfolio_assets as usize;
-        for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
-            let bit = active_bitmap_get(account.active_bitmap, i);
-            let leg = account.legs[i];
-            if i >= n {
-                if bit || leg != PortfolioLegV16::default() {
-                    return Err(V16Error::HiddenLeg);
-                }
-                continue;
-            }
-
+        let mut seen_assets = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let bit = active_bitmap_get(account.active_bitmap, slot);
+            let leg = account.legs[slot];
             if bit != leg.active {
                 return Err(V16Error::HiddenLeg);
             }
@@ -3631,9 +3630,14 @@ impl MarketGroupV16 {
                 }
             } else {
                 validate_active_leg(leg)?;
-                if leg.market_id != self.assets[i].market_id
+                let asset_index = leg.asset_index as usize;
+                if asset_index >= n || seen_assets[asset_index] {
+                    return Err(V16Error::HiddenLeg);
+                }
+                seen_assets[asset_index] = true;
+                if leg.market_id != self.assets[asset_index].market_id
                     || !matches!(
-                        self.assets[i].lifecycle,
+                        self.assets[asset_index].lifecycle,
                         AssetLifecycleV16::Active
                             | AssetLifecycleV16::DrainOnly
                             | AssetLifecycleV16::Recovery
@@ -3646,7 +3650,7 @@ impl MarketGroupV16 {
         if account.close_progress.active {
             let i = account.close_progress.asset_index as usize;
             if i < n {
-                let leg = account.legs[i];
+                let leg = self.active_leg_for_asset(account, i)?;
                 if leg.active && account.close_progress.domain_side != opposite_side(leg.side) {
                     return Err(V16Error::InvalidLeg);
                 }
@@ -3654,11 +3658,66 @@ impl MarketGroupV16 {
         }
         if account.close_progress.quantity_adl_applied_q != 0 {
             let i = account.close_progress.asset_index as usize;
-            if i >= n || account.legs[i].active {
+            if i >= n || self.active_leg_slot_for_asset(account, i)?.is_some() {
                 return Err(V16Error::InvalidLeg);
             }
         }
         Ok(())
+    }
+
+    fn active_leg_slot_for_asset(
+        &self,
+        account: &PortfolioAccountV16,
+        asset_index: usize,
+    ) -> V16Result<Option<usize>> {
+        self.validate_configured_asset_index(asset_index)?;
+        let mut found = None;
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
+                continue;
+            }
+            if leg.asset_index as usize == asset_index {
+                if found.is_some() {
+                    return Err(V16Error::HiddenLeg);
+                }
+                found = Some(slot);
+            }
+        }
+        Ok(found)
+    }
+
+    fn require_active_leg_slot_for_asset(
+        &self,
+        account: &PortfolioAccountV16,
+        asset_index: usize,
+    ) -> V16Result<usize> {
+        self.active_leg_slot_for_asset(account, asset_index)?
+            .ok_or(V16Error::InvalidLeg)
+    }
+
+    fn active_leg_for_asset(
+        &self,
+        account: &PortfolioAccountV16,
+        asset_index: usize,
+    ) -> V16Result<PortfolioLegV16> {
+        if let Some(slot) = self.active_leg_slot_for_asset(account, asset_index)? {
+            Ok(account.legs[slot])
+        } else {
+            Ok(PortfolioLegV16::EMPTY)
+        }
+    }
+
+    fn empty_leg_slot(account: &PortfolioAccountV16) -> V16Result<usize> {
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            if !active_bitmap_get(account.active_bitmap, slot) && !account.legs[slot].active {
+                if account.legs[slot] != PortfolioLegV16::EMPTY {
+                    return Err(V16Error::HiddenLeg);
+                }
+                return Ok(slot);
+            }
+        }
+        Err(V16Error::InvalidLeg)
     }
 
     fn validate_resolved_payout_receipt(&self, receipt: ResolvedPayoutReceiptV16) -> V16Result<()> {
@@ -4087,7 +4146,8 @@ impl MarketGroupV16 {
             return Err(V16Error::InvalidConfig);
         }
         let existing = account.health_cert;
-        let new_abs_q = signed_position(account.legs[asset_index]).unsigned_abs();
+        let new_abs_q =
+            signed_position(self.active_leg_for_asset(account, asset_index)?).unsigned_abs();
         let old_notional = risk_notional_ceil(old_abs_q, price)?;
         let new_notional = risk_notional_ceil(new_abs_q, price)?;
         let old_initial = margin_requirement(
@@ -4654,11 +4714,14 @@ impl MarketGroupV16 {
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
             return Err(V16Error::LockActive);
         }
-        if account.legs[asset_index].active || active_bitmap_get(account.active_bitmap, asset_index)
+        if self
+            .active_leg_slot_for_asset(account, asset_index)?
+            .is_some()
         {
             return Err(V16Error::InvalidLeg);
         }
         validate_basis(basis_pos_q)?;
+        let leg_slot = Self::empty_leg_slot(account)?;
 
         let asset = self.assets[asset_index];
         let (a_basis, k_snap, f_snap, b_snap, epoch_snap) = match side {
@@ -4716,8 +4779,9 @@ impl MarketGroupV16 {
                     .ok_or(V16Error::ArithmeticOverflow)?;
             }
         }
-        account.legs[asset_index] = PortfolioLegV16 {
+        account.legs[leg_slot] = PortfolioLegV16 {
             active: true,
+            asset_index: asset_index as u32,
             market_id: asset.market_id,
             side,
             basis_pos_q,
@@ -4732,7 +4796,7 @@ impl MarketGroupV16 {
             b_stale: false,
             stale: false,
         };
-        active_bitmap_set(&mut account.active_bitmap, asset_index)?;
+        active_bitmap_set(&mut account.active_bitmap, leg_slot)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -4746,7 +4810,8 @@ impl MarketGroupV16 {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V16Error::InvalidLeg);
         }
-        let leg = account.legs[asset_index];
+        let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
+        let leg = account.legs[leg_slot];
         if !leg.active || leg.b_stale || leg.stale {
             return Err(V16Error::InvalidLeg);
         }
@@ -4842,8 +4907,8 @@ impl MarketGroupV16 {
                 }
             }
         }
-        account.legs[asset_index] = PortfolioLegV16::EMPTY;
-        active_bitmap_clear(&mut account.active_bitmap, asset_index)?;
+        account.legs[leg_slot] = PortfolioLegV16::EMPTY;
+        active_bitmap_clear(&mut account.active_bitmap, leg_slot)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -4854,12 +4919,11 @@ impl MarketGroupV16 {
         asset_index: usize,
     ) -> V16Result<()> {
         self.validate_account_shape(account)?;
-        if asset_index >= self.config.max_portfolio_assets as usize
-            || !account.legs[asset_index].active
-        {
+        if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V16Error::InvalidLeg);
         }
-        account.legs[asset_index].b_stale = true;
+        let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
+        account.legs[leg_slot].b_stale = true;
         self.mark_account_b_stale(account)
     }
 
@@ -4914,8 +4978,9 @@ impl MarketGroupV16 {
 
     fn account_has_target_effective_lag(&self, account: &PortfolioAccountV16) -> V16Result<bool> {
         self.validate_account_shape(account)?;
-        for i in 0..self.config.max_portfolio_assets as usize {
-            if account.legs[i].active && self.asset_has_target_effective_lag(i)? {
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if leg.active && self.asset_has_target_effective_lag(leg.asset_index as usize)? {
                 return Ok(true);
             }
         }
@@ -4929,14 +4994,16 @@ impl MarketGroupV16 {
     ) -> V16Result<HealthCertV16> {
         self.validate_account_shape(account)?;
         self.reconcile_account_source_credit_liens_not_atomic(account)?;
-        let n = self.config.max_portfolio_assets as usize;
-        for i in 0..n {
-            if !account.legs[i].active {
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
                 continue;
             }
-            self.settle_leg_kf_effects(account, i)?;
-            if self.b_target_for_leg(i, account.legs[i])? > account.legs[i].b_snap {
-                self.mark_leg_b_stale(account, i)?;
+            let asset_index = leg.asset_index as usize;
+            self.settle_leg_kf_effects(account, asset_index)?;
+            let leg_after = account.legs[slot];
+            if self.b_target_for_leg(asset_index, leg_after)? > leg_after.b_snap {
+                self.mark_leg_b_stale(account, asset_index)?;
             }
         }
         if account.b_stale_state {
@@ -4949,16 +5016,17 @@ impl MarketGroupV16 {
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
         let mut worst_case_loss = 0u128;
-        for i in 0..n {
-            if !account.legs[i].active {
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
                 continue;
             }
-            let price = effective_prices[i];
+            let asset_index = leg.asset_index as usize;
+            let price = effective_prices[asset_index];
             if price == 0 || price > MAX_ORACLE_PRICE {
                 return Err(V16Error::InvalidConfig);
             }
-            let risk_notional =
-                risk_notional_ceil(account.legs[i].basis_pos_q.unsigned_abs(), price)?;
+            let risk_notional = risk_notional_ceil(leg.basis_pos_q.unsigned_abs(), price)?;
             let leg_initial = margin_requirement(
                 risk_notional,
                 self.config.initial_margin_bps,
@@ -5035,7 +5103,7 @@ impl MarketGroupV16 {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V16Error::InvalidLeg);
         }
-        let leg = account.legs[asset_index];
+        let leg = self.active_leg_for_asset(account, asset_index)?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
@@ -5105,9 +5173,10 @@ impl MarketGroupV16 {
         let new_pnl = old_pnl
             .checked_sub(loss_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
 
         {
-            let leg = &mut account.legs[asset_index];
+            let leg = &mut account.legs[leg_slot];
             leg.b_snap = leg
                 .b_snap
                 .checked_add(chunk.delta_b)
@@ -5132,16 +5201,18 @@ impl MarketGroupV16 {
         b_delta_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_account_shape(account)?;
-        let n = self.config.max_portfolio_assets as usize;
-        for i in 0..n {
-            if !account.legs[i].active {
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
                 continue;
             }
-            self.settle_leg_kf_effects(account, i)?;
-            let target = self.b_target_for_leg(i, account.legs[i])?;
-            if target > account.legs[i].b_snap {
-                self.mark_leg_b_stale(account, i)?;
-                let chunk = self.settle_account_b_chunk(account, i, b_delta_budget)?;
+            let asset_index = leg.asset_index as usize;
+            self.settle_leg_kf_effects(account, asset_index)?;
+            let refreshed = self.active_leg_for_asset(account, asset_index)?;
+            let target = self.b_target_for_leg(asset_index, refreshed)?;
+            if target > refreshed.b_snap {
+                self.mark_leg_b_stale(account, asset_index)?;
+                let chunk = self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
                 if chunk.remaining_after != 0 {
                     return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(chunk));
                 }
@@ -5163,12 +5234,18 @@ impl MarketGroupV16 {
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
         let mut worst_case_loss = 0u128;
-        for i in 0..n {
-            if !account.legs[i].active {
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
                 continue;
             }
+            let i = leg.asset_index as usize;
+            if i >= n {
+                return Err(V16Error::InvalidLeg);
+            }
             self.settle_leg_kf_effects(account, i)?;
-            if self.b_target_for_leg(i, account.legs[i])? > account.legs[i].b_snap {
+            let refreshed = self.active_leg_for_asset(account, i)?;
+            if self.b_target_for_leg(i, refreshed)? > refreshed.b_snap {
                 self.mark_leg_b_stale(account, i)?;
                 let chunk =
                     self.settle_account_b_chunk(account, i, self.config.public_b_chunk_atoms)?;
@@ -5180,8 +5257,7 @@ impl MarketGroupV16 {
             if price == 0 || price > MAX_ORACLE_PRICE {
                 return Err(V16Error::InvalidConfig);
             }
-            let risk_notional =
-                risk_notional_ceil(account.legs[i].basis_pos_q.unsigned_abs(), price)?;
+            let risk_notional = risk_notional_ceil(refreshed.basis_pos_q.unsigned_abs(), price)?;
             let leg_initial = margin_requirement(
                 risk_notional,
                 self.config.initial_margin_bps,
@@ -5406,9 +5482,13 @@ impl MarketGroupV16 {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let locked = self.h_lock_lane(Some(long_account), false)? == HLockLaneV16::HMax
             || self.h_lock_lane(Some(short_account), false)? == HLockLaneV16::HMax;
-        let risk_increasing =
-            position_delta_increases_risk(long_account, request.asset_index, long_delta)?
-                || position_delta_increases_risk(short_account, request.asset_index, short_delta)?;
+        let risk_increasing = position_delta_increases_risk(
+            signed_position(self.active_leg_for_asset(long_account, request.asset_index)?),
+            long_delta,
+        )? || position_delta_increases_risk(
+            signed_position(self.active_leg_for_asset(short_account, request.asset_index)?),
+            short_delta,
+        )?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let touches_pending_domain_barrier =
             self.position_delta_blocked_by_pending_domain_loss_barrier(
@@ -5432,8 +5512,12 @@ impl MarketGroupV16 {
 
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
-        let long_old_abs = signed_position(long_account.legs[request.asset_index]).unsigned_abs();
-        let short_old_abs = signed_position(short_account.legs[request.asset_index]).unsigned_abs();
+        let long_old_abs =
+            signed_position(self.active_leg_for_asset(long_account, request.asset_index)?)
+                .unsigned_abs();
+        let short_old_abs =
+            signed_position(self.active_leg_for_asset(short_account, request.asset_index)?)
+                .unsigned_abs();
         self.charge_account_fee_current_not_atomic(long_account, fee)?;
         self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
@@ -5496,7 +5580,8 @@ impl MarketGroupV16 {
             return Err(V16Error::NonProgress);
         }
         let before_score = self.risk_score_unchecked(account)?;
-        let leg = account.legs[request.asset_index];
+        let leg_slot = self.require_active_leg_slot_for_asset(account, request.asset_index)?;
+        let leg = account.legs[leg_slot];
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
@@ -5521,7 +5606,7 @@ impl MarketGroupV16 {
             0
         };
         let remaining_active_bitmap = if close_q == leg.basis_pos_q.unsigned_abs() {
-            active_bitmap_with_cleared(account.active_bitmap, request.asset_index)?
+            active_bitmap_with_cleared(account.active_bitmap, leg_slot)?
         } else {
             account.active_bitmap
         };
@@ -5610,7 +5695,7 @@ impl MarketGroupV16 {
         if asset_index >= self.config.max_portfolio_assets as usize || b_delta_budget == 0 {
             return Err(V16Error::InvalidLeg);
         }
-        let leg = account.legs[asset_index];
+        let leg = self.active_leg_for_asset(account, asset_index)?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
@@ -5622,9 +5707,8 @@ impl MarketGroupV16 {
             self.settle_forfeited_leg_kf_effects(account, asset_index)?;
 
         let mut total_loss_settled = loss_settled;
-        if self.b_target_for_leg(asset_index, account.legs[asset_index])?
-            > account.legs[asset_index].b_snap
-        {
+        let refreshed = self.active_leg_for_asset(account, asset_index)?;
+        if self.b_target_for_leg(asset_index, refreshed)? > refreshed.b_snap {
             self.mark_leg_b_stale(account, asset_index)?;
             let chunk = self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
             total_loss_settled = total_loss_settled
@@ -5745,7 +5829,7 @@ impl MarketGroupV16 {
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
         let before_score = self.risk_score_unchecked(account)?;
-        let leg = account.legs[request.asset_index];
+        let leg = self.active_leg_for_asset(account, request.asset_index)?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
@@ -5793,7 +5877,9 @@ impl MarketGroupV16 {
             PermissionlessCrankActionV16::Refresh => {
                 let touches_accrued_asset = request.asset_index
                     < self.config.max_portfolio_assets as usize
-                    && account.legs[request.asset_index].active;
+                    && self
+                        .active_leg_slot_for_asset(account, request.asset_index)?
+                        .is_some();
                 if let PermissionlessProgressOutcomeV16::AccountBChunk(out) = self
                     .settle_account_side_effects_not_atomic(
                         account,
@@ -6289,11 +6375,8 @@ impl MarketGroupV16 {
     ) -> V16Result<QuantityAdlOutcomeV16> {
         self.validate_account_shape(account)?;
         let ledger = account.close_progress;
-        let leg = if asset_index < self.config.max_portfolio_assets as usize {
-            account.legs[asset_index]
-        } else {
-            return Err(V16Error::InvalidLeg);
-        };
+        self.validate_configured_asset_index(asset_index)?;
+        let leg = self.active_leg_for_asset(account, asset_index)?;
         if !ledger.active
             || !ledger.finalized
             || ledger.residual_remaining != 0
@@ -6326,12 +6409,9 @@ impl MarketGroupV16 {
         asset_index: usize,
         leg: PortfolioLegV16,
     ) -> V16Result<()> {
-        if asset_index >= self.config.max_portfolio_assets as usize
-            || !leg.active
-            || leg.stale
-            || leg.b_stale
-            || account.legs[asset_index] != leg
-        {
+        self.validate_configured_asset_index(asset_index)?;
+        let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
+        if !leg.active || leg.stale || leg.b_stale || account.legs[leg_slot] != leg {
             return Err(V16Error::InvalidLeg);
         }
 
@@ -6372,8 +6452,8 @@ impl MarketGroupV16 {
                 }
             }
         }
-        account.legs[asset_index] = PortfolioLegV16::EMPTY;
-        active_bitmap_clear(&mut account.active_bitmap, asset_index)?;
+        account.legs[leg_slot] = PortfolioLegV16::EMPTY;
+        active_bitmap_clear(&mut account.active_bitmap, leg_slot)?;
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -6401,7 +6481,9 @@ impl MarketGroupV16 {
         }
         let asset_index = ledger.asset_index as usize;
         if asset_index < self.config.max_portfolio_assets as usize
-            && account.legs[asset_index].active
+            && self
+                .active_leg_slot_for_asset(account, asset_index)?
+                .is_some()
             && self.current_slot > ledger.drift_reference_slot
         {
             self.declare_permissionless_recovery(
@@ -8714,7 +8796,7 @@ impl MarketGroupV16 {
         domain: usize,
     ) -> V16Result<bool> {
         let (asset_index, source_side) = self.source_domain_asset_side(domain)?;
-        let leg = account.legs[asset_index];
+        let leg = self.active_leg_for_asset(account, asset_index)?;
         Ok(leg.active && opposite_side(leg.side) == source_side)
     }
 
@@ -8739,17 +8821,15 @@ impl MarketGroupV16 {
         &self,
         account: &PortfolioAccountV16,
     ) -> V16Result<bool> {
-        let limit = core::cmp::min(
-            self.config.max_portfolio_assets as usize,
-            V16_MAX_PORTFOLIO_ASSETS_N,
-        );
-        let mut i = 0usize;
-        while i < limit {
-            let leg = account.legs[i];
-            if leg.active && self.has_pending_domain_loss_barrier(i, leg.side)? {
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if leg.active
+                && self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?
+            {
                 return Ok(true);
             }
-            i += 1;
+            slot += 1;
         }
         Ok(false)
     }
@@ -8766,7 +8846,7 @@ impl MarketGroupV16 {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V16Error::InvalidLeg);
         }
-        let current = signed_position(account.legs[asset_index]);
+        let current = signed_position(self.active_leg_for_asset(account, asset_index)?);
         let next = current
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -8807,7 +8887,7 @@ impl MarketGroupV16 {
         )? {
             return Ok(false);
         }
-        let current = signed_position(account.legs[asset_index]);
+        let current = signed_position(self.active_leg_for_asset(account, asset_index)?);
         let next = current
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -8995,10 +9075,10 @@ impl MarketGroupV16 {
         account: &mut PortfolioAccountV16,
         asset_index: usize,
     ) -> V16Result<()> {
-        let leg = account.legs[asset_index];
-        if !leg.active {
+        let Some(leg_slot) = self.active_leg_slot_for_asset(account, asset_index)? else {
             return Ok(());
-        }
+        };
+        let leg = account.legs[leg_slot];
         let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
         let den = leg
             .a_basis
@@ -9038,8 +9118,8 @@ impl MarketGroupV16 {
                 )?;
             }
         }
-        account.legs[asset_index].k_snap = k_now;
-        account.legs[asset_index].f_snap = f_now;
+        account.legs[leg_slot].k_snap = k_now;
+        account.legs[leg_slot].f_snap = f_now;
         account.health_cert.valid = false;
         Ok(())
     }
@@ -9049,10 +9129,10 @@ impl MarketGroupV16 {
         account: &mut PortfolioAccountV16,
         asset_index: usize,
     ) -> V16Result<(u128, u128, u128, u128)> {
-        let leg = account.legs[asset_index];
-        if !leg.active {
+        let Some(leg_slot) = self.active_leg_slot_for_asset(account, asset_index)? else {
             return Ok((0, 0, 0, 0));
-        }
+        };
+        let leg = account.legs[leg_slot];
         let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
         let den = leg
             .a_basis
@@ -9088,8 +9168,8 @@ impl MarketGroupV16 {
             positive_pnl_forfeited = net as u128;
         }
 
-        account.legs[asset_index].k_snap = k_now;
-        account.legs[asset_index].f_snap = f_now;
+        account.legs[leg_slot].k_snap = k_now;
+        account.legs[leg_slot].f_snap = f_now;
         account.health_cert.valid = false;
         Ok((
             loss_settled,
@@ -9119,7 +9199,7 @@ impl MarketGroupV16 {
             return Err(V16Error::LockActive);
         }
         self.settle_leg_kf_effects(account, asset_index)?;
-        let current = signed_position(account.legs[asset_index]);
+        let current = signed_position(self.active_leg_for_asset(account, asset_index)?);
         let new = current
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -9132,8 +9212,9 @@ impl MarketGroupV16 {
             };
             return self.attach_leg(account, asset_index, side, new);
         }
+        let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
         if new == 0 {
-            let leg = account.legs[asset_index];
+            let leg = account.legs[leg_slot];
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
                 let old_abs = leg.basis_pos_q.unsigned_abs();
                 let asset = &mut self.assets[asset_index];
@@ -9159,7 +9240,7 @@ impl MarketGroupV16 {
                             .ok_or(V16Error::CounterOverflow)?;
                     }
                 }
-                account.legs[asset_index].basis_pos_q = 0;
+                account.legs[leg_slot].basis_pos_q = 0;
                 account.health_cert.valid = false;
                 return self.validate_account_shape(account);
             }
@@ -9179,7 +9260,7 @@ impl MarketGroupV16 {
         if new.unsigned_abs() > current.unsigned_abs() {
             self.require_asset_active_for_risk_increase(asset_index)?;
         }
-        let old_leg = account.legs[asset_index];
+        let old_leg = account.legs[leg_slot];
         let old_abs = old_leg.basis_pos_q.unsigned_abs();
         let new_abs = new.unsigned_abs();
         let new_weight = loss_weight_for_basis(new_abs, old_leg.a_basis)?;
@@ -9203,9 +9284,9 @@ impl MarketGroupV16 {
                 }
             }
         }
-        account.legs[asset_index].basis_pos_q = new;
+        account.legs[leg_slot].basis_pos_q = new;
         if !preserve_pending_obligation_weight {
-            account.legs[asset_index].loss_weight = new_weight;
+            account.legs[leg_slot].loss_weight = new_weight;
         }
         account.health_cert.valid = false;
         self.validate_account_shape(account)
@@ -9220,7 +9301,7 @@ impl MarketGroupV16 {
         if close_q == 0 {
             return Ok(());
         }
-        let leg = account.legs[asset_index];
+        let leg = self.active_leg_for_asset(account, asset_index)?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
@@ -9532,12 +9613,7 @@ fn ensure_no_positive_credit_initial_margin(account: &PortfolioAccountV16) -> V1
     Ok(())
 }
 
-fn position_delta_increases_risk(
-    account: &PortfolioAccountV16,
-    asset_index: usize,
-    delta_q: i128,
-) -> V16Result<bool> {
-    let current = signed_position(account.legs[asset_index]);
+fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool> {
     let next = current
         .checked_add(delta_q)
         .ok_or(V16Error::ArithmeticOverflow)?;
@@ -9823,6 +9899,9 @@ fn validate_basis(basis_pos_q: i128) -> V16Result<()> {
 fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
     validate_non_min_i128(leg.k_snap)?;
     validate_non_min_i128(leg.f_snap)?;
+    if leg.asset_index as usize >= V16_DOMAIN_COUNT / 2 {
+        return Err(V16Error::InvalidLeg);
+    }
     let current_loss_weight = if leg.basis_pos_q == 0 {
         0
     } else {

@@ -38,6 +38,18 @@ fn bitmap_count_ones(bitmap: percolator::V16ActiveBitmap) -> u32 {
     bitmap.iter().map(|word| word.count_ones()).sum()
 }
 
+fn active_leg_for_asset(
+    account: &PortfolioAccountV16,
+    asset_index: usize,
+) -> Option<(usize, PortfolioLegV16)> {
+    account
+        .legs
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, leg)| leg.active && leg.asset_index as usize == asset_index)
+}
+
 fn set_junior_bound(group: &mut MarketGroupV16, amount: u128) {
     group.pnl_pos_bound_tot = amount;
     group.pnl_pos_bound_tot_num = amount.checked_mul(BOUND_SCALE).unwrap();
@@ -457,7 +469,9 @@ fn v16_source_backed_conversion_only_waits_for_contributing_source_exposure() {
     );
     assert_eq!(claimant.capital, 10);
     assert_eq!(claimant.pnl, 0);
-    assert_eq!(claimant.active_bitmap, bitmap(&[1]));
+    let (claimant_slot, claimant_leg) = active_leg_for_asset(&claimant, 1).unwrap();
+    assert_eq!(claimant.active_bitmap, bitmap(&[claimant_slot]));
+    assert_eq!(claimant_leg.market_id, g.assets[1].market_id);
     assert_eq!(g.source_credit[0].spent_backing_num, 10 * BOUND_SCALE);
     g.assert_public_invariants().unwrap();
 }
@@ -1046,6 +1060,7 @@ fn attach_opposite(
 fn active_leg(side: SideV16, basis_pos_q: i128) -> PortfolioLegV16 {
     PortfolioLegV16 {
         active: true,
+        asset_index: 0,
         market_id: 1,
         side,
         basis_pos_q,
@@ -2676,7 +2691,10 @@ fn v16_attach_and_clear_leg_update_only_bounded_account_and_asset_state() {
     let mut a = account();
 
     g.attach_leg(&mut a, 1, SideV16::Short, -7).unwrap();
-    assert_eq!(a.active_bitmap, bitmap(&[1]));
+    let (slot, leg) = active_leg_for_asset(&a, 1).unwrap();
+    assert_eq!(a.active_bitmap, bitmap(&[slot]));
+    assert_eq!(leg.asset_index, 1);
+    assert_eq!(leg.market_id, g.assets[1].market_id);
     assert_eq!(g.assets[1].stored_pos_count_short, 1);
     assert_eq!(g.assets[1].oi_eff_short_q, 7);
     assert_eq!(g.assets[1].loss_weight_sum_short, 7);
@@ -2686,6 +2704,36 @@ fn v16_attach_and_clear_leg_update_only_bounded_account_and_asset_state() {
     assert_eq!(g.assets[1].stored_pos_count_short, 0);
     assert_eq!(g.assets[1].oi_eff_short_q, 0);
     assert_eq!(g.assets[1].loss_weight_sum_short, 0);
+}
+
+#[test]
+fn v16_portfolio_legs_are_compact_slots_keyed_by_asset_identity() {
+    let mut g = group();
+    let mut a = account();
+
+    g.attach_leg(&mut a, 3, SideV16::Long, 11).unwrap();
+    g.attach_leg(&mut a, 1, SideV16::Short, -7).unwrap();
+
+    let (slot_3, leg_3) = active_leg_for_asset(&a, 3).unwrap();
+    let (slot_1, leg_1) = active_leg_for_asset(&a, 1).unwrap();
+    assert_eq!(a.active_bitmap, bitmap(&[slot_3, slot_1]));
+    assert_eq!(slot_3, 0);
+    assert_eq!(slot_1, 1);
+    assert_eq!(leg_3.market_id, g.assets[3].market_id);
+    assert_eq!(leg_1.market_id, g.assets[1].market_id);
+
+    g.clear_leg(&mut a, 3).unwrap();
+    assert_eq!(active_leg_for_asset(&a, 3), None);
+    let (still_slot_1, _) = active_leg_for_asset(&a, 1).unwrap();
+    assert_eq!(still_slot_1, 1);
+    assert_eq!(a.active_bitmap, bitmap(&[1]));
+
+    g.attach_leg(&mut a, 2, SideV16::Long, 5).unwrap();
+    let (slot_2, leg_2) = active_leg_for_asset(&a, 2).unwrap();
+    assert_eq!(slot_2, 0);
+    assert_eq!(leg_2.market_id, g.assets[2].market_id);
+    assert_eq!(a.active_bitmap, bitmap(&[0, 1]));
+    assert_eq!(g.validate_account_shape(&a), Ok(()));
 }
 
 #[test]
@@ -6069,7 +6117,7 @@ fn v16_dead_leg_forfeit_detaches_without_crediting_positive_pnl() {
     assert_eq!(g.pnl_pos_tot, 0);
     assert_eq!(a.active_bitmap, bitmap(&[]));
     assert!(!a.legs[0].active);
-    assert!(unrelated.legs[1].active);
+    assert!(active_leg_for_asset(&unrelated, 1).is_some());
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
     assert_eq!(g.assets[1].oi_eff_short_q, POS_SCALE);
 }

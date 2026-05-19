@@ -6,11 +6,11 @@ use percolator::v16::{
     LiquidationRequestV16, MarketGroupV16, MarketGroupV16Account, MarketGroupV16HeaderAccount,
     MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
-    PortfolioAccountV16Account, PortfolioLegV16, ProvenanceHeaderV16, RebalanceRequestV16,
-    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
-    SideV16, SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TradeRequestV16,
-    V16ActiveBitmap, V16Config, V16Error, V16PodI128, V16PodU64, V16_DOMAIN_COUNT,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, ProvenanceHeaderV16,
+    RebalanceRequestV16, ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16,
+    ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditLienAggregateProofV16,
+    StockReconciliationProofV16, TradeRequestV16, V16ActiveBitmap, V16Config, V16Error, V16PodI128,
+    V16PodU64, V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_OI_SIDE_Q, MAX_POSITION_ABS_Q,
@@ -1634,6 +1634,102 @@ fn proof_v16_portfolio_wire_roundtrip_preserves_source_lien_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_v16_portfolio_leg_wire_roundtrip_preserves_asset_index() {
+    let raw_idx: u8 = kani::any();
+    let asset_index = (raw_idx % 4) as u32;
+    let long_side: bool = kani::any();
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let basis_pos_q = if long_side { 7 } else { -7 };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index,
+        market_id: 11 + asset_index as u64,
+        side,
+        basis_pos_q,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: 7,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+
+    let wire = PortfolioLegV16Account::from_runtime(&leg);
+    let decoded = wire.try_to_runtime().unwrap();
+
+    kani::cover!(
+        asset_index == 3,
+        "v16 leg asset-index roundtrip covers nonzero compact asset"
+    );
+    assert_eq!(decoded.asset_index, asset_index);
+    assert_eq!(decoded.market_id, leg.market_id);
+    assert_eq!(decoded.side, side);
+    assert_eq!(decoded.basis_pos_q, basis_pos_q);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_validate_account_shape_binds_compact_leg_slot_to_asset_identity() {
+    let raw_idx: u8 = kani::any();
+    let asset_index = (raw_idx % 4) as usize;
+    let corrupt_market_id: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let group = MarketGroupV16::new(market, V16Config::public_user_fund(4, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.active_bitmap = bitmap(&[0]);
+    account.legs[0] = PortfolioLegV16 {
+        active: true,
+        asset_index: asset_index as u32,
+        market_id: if corrupt_market_id {
+            group.assets[(asset_index + 1) % 4].market_id
+        } else {
+            group.assets[asset_index].market_id
+        },
+        side: SideV16::Long,
+        basis_pos_q: 7,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: 7,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+
+    kani::cover!(
+        asset_index == 3 && !corrupt_market_id,
+        "v16 compact leg accepts nonzero asset id in slot zero"
+    );
+    kani::cover!(
+        corrupt_market_id,
+        "v16 compact leg rejects stale market identity"
+    );
+    if corrupt_market_id {
+        assert_eq!(
+            group.validate_account_shape(&account),
+            Err(V16Error::HiddenLeg)
+        );
+    } else {
+        assert_eq!(group.validate_account_shape(&account), Ok(()));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_v16_persisted_wire_rejects_i128_min_economic_fields() {
@@ -3098,6 +3194,7 @@ fn proof_v16_configured_portfolio_width_rejects_out_of_range_leg() {
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
     account.legs[1] = PortfolioLegV16 {
         active: true,
+        asset_index: 1,
         market_id: group.assets[1].market_id,
         side: SideV16::Long,
         basis_pos_q: 1,
@@ -3147,6 +3244,45 @@ fn proof_v16_attach_then_clear_leg_restores_account_local_counters_for_long() {
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v16_compact_leg_slots_preserve_asset_identity() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(4, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+
+    group
+        .attach_leg(&mut account, 3, SideV16::Long, 11)
+        .unwrap();
+    group
+        .attach_leg(&mut account, 1, SideV16::Short, -7)
+        .unwrap();
+
+    assert_eq!(account.active_bitmap, bitmap(&[0, 1]));
+    assert!(account.legs[0].active);
+    assert!(account.legs[1].active);
+    assert_eq!(account.legs[0].asset_index, 3);
+    assert_eq!(account.legs[1].asset_index, 1);
+    assert_eq!(account.legs[0].market_id, group.assets[3].market_id);
+    assert_eq!(account.legs[1].market_id, group.assets[1].market_id);
+
+    group.clear_leg(&mut account, 3).unwrap();
+    assert!(!account.legs[0].active);
+    assert!(account.legs[1].active);
+    assert_eq!(account.legs[1].asset_index, 1);
+    assert_eq!(account.active_bitmap, bitmap(&[1]));
+
+    group.attach_leg(&mut account, 2, SideV16::Long, 5).unwrap();
+    assert!(account.legs[0].active);
+    assert!(account.legs[1].active);
+    assert_eq!(account.legs[0].asset_index, 2);
+    assert_eq!(account.legs[1].asset_index, 1);
+    assert_eq!(account.active_bitmap, bitmap(&[0, 1]));
+    assert_eq!(group.validate_account_shape(&account), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
 fn proof_v16_same_asset_duplicate_leg_cannot_double_count_support() {
@@ -3162,6 +3298,7 @@ fn proof_v16_same_asset_duplicate_leg_cannot_double_count_support() {
     };
     account.legs[0] = PortfolioLegV16 {
         active: true,
+        asset_index: 0,
         market_id: group.assets[0].market_id,
         side: existing_side,
         basis_pos_q: existing_basis,
@@ -4084,6 +4221,7 @@ fn proof_v16_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
     account.active_bitmap = bitmap(&[0, 1]);
     account.legs[0] = PortfolioLegV16 {
         active: true,
+        asset_index: 0,
         market_id: group.assets[0].market_id,
         side: SideV16::Long,
         basis_pos_q: POS_SCALE as i128,
@@ -4100,6 +4238,7 @@ fn proof_v16_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
     };
     account.legs[1] = PortfolioLegV16 {
         active: true,
+        asset_index: 1,
         market_id: group.assets[1].market_id,
         side: SideV16::Short,
         basis_pos_q: -(POS_SCALE as i128),
