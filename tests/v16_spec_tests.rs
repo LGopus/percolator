@@ -1,13 +1,13 @@
 use percolator::v16::{
     account_equity, risk_notional_ceil, AssetLifecycleV16, AssetStateV16Account,
-    CloseProgressLedgerV16, HLockLaneV16, HealthCertV16Account, LiquidationRequestV16,
-    MarketGroupV16, MarketGroupV16Account, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    RebalanceRequestV16, ReservationEncumbranceProofV16, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16,
-    SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
+    CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account,
+    LiquidationRequestV16, MarketGroupV16, MarketGroupV16Account, MarketGroupV16HeaderAccount,
+    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, RebalanceRequestV16, ReservationEncumbranceProofV16,
+    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
+    SideV16, SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
     TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64,
     V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
@@ -978,6 +978,46 @@ fn v16_asset_retire_requires_empty_source_credit_state() {
     );
 }
 
+#[test]
+fn v16_backing_domains_are_bound_to_asset_slot_market_id() {
+    let mut g = group();
+    let asset_market_id = g.assets[0].market_id;
+
+    assert_eq!(g.source_backing_buckets[0].market_id, asset_market_id);
+    assert_eq!(g.source_backing_buckets[1].market_id, asset_market_id);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+
+    g.source_backing_buckets[0].market_id = asset_market_id + 1;
+    assert_eq!(
+        g.assert_public_invariants(),
+        Err(V16Error::InvalidConfig),
+        "backing for a selected domain must be authenticated to that asset slot's market_id"
+    );
+}
+
+#[test]
+fn v16_asset_reuse_rebinds_backing_domains_and_rejects_stale_bucket_identity() {
+    let mut g = group();
+    g.config.asset_activation_cooldown_slots = 1;
+    let old_market_id = g.assets[0].market_id;
+    let next_market_id = g.next_market_id;
+
+    g.retire_empty_asset_not_atomic(0, 1).unwrap();
+    g.activate_empty_asset_not_atomic(0, 100, 2).unwrap();
+
+    assert_eq!(g.assets[0].market_id, next_market_id);
+    assert_ne!(g.assets[0].market_id, old_market_id);
+    assert_eq!(g.source_backing_buckets[0].market_id, next_market_id);
+    assert_eq!(g.source_backing_buckets[1].market_id, next_market_id);
+
+    g.source_backing_buckets[1].market_id = old_market_id;
+    assert_eq!(
+        g.assert_public_invariants(),
+        Err(V16Error::InvalidConfig),
+        "reused slots must not retain stale backing identity from the prior market_id"
+    );
+}
+
 fn account_with_id(id: u8) -> PortfolioAccountV16 {
     let (market, _, owner) = ids();
     PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [id; 32], owner))
@@ -1035,6 +1075,7 @@ fn v16_persisted_account_wire_structs_are_bytemuck_pod() {
     assert_pod_zeroable::<ProvenanceHeaderV16Account>();
     assert_pod_zeroable::<V16ConfigAccount>();
     assert_pod_zeroable::<AssetStateV16Account>();
+    assert_pod_zeroable::<EngineAssetSlotV16Account>();
     assert_pod_zeroable::<PortfolioLegV16Account>();
     assert_pod_zeroable::<HealthCertV16Account>();
     assert_pod_zeroable::<PortfolioAccountV16Account>();
@@ -1120,11 +1161,11 @@ fn v16_persisted_account_wire_rejects_invalid_bool_enum_and_option_encoding() {
     );
 
     let mut bad_side_mode = MarketGroupV16Account::from_runtime(&g);
-    bad_side_mode.assets[0].mode_long = 9;
+    bad_side_mode.asset_slots[0].asset.mode_long = 9;
     assert_eq!(bad_side_mode.try_to_runtime(), Err(V16Error::InvalidConfig));
 
     let mut bad_asset_lifecycle = MarketGroupV16Account::from_runtime(&g);
-    bad_asset_lifecycle.assets[0].lifecycle = 9;
+    bad_asset_lifecycle.asset_slots[0].asset.lifecycle = 9;
     assert_eq!(
         bad_asset_lifecycle.try_to_runtime(),
         Err(V16Error::InvalidConfig)
@@ -1134,6 +1175,103 @@ fn v16_persisted_account_wire_rejects_invalid_bool_enum_and_option_encoding() {
     bad_option.recovery_reason.present = 0;
     bad_option.recovery_reason.value = 1;
     assert_eq!(bad_option.try_to_runtime(), Err(V16Error::InvalidConfig));
+}
+
+#[test]
+fn v16_persisted_market_wire_rejects_backing_slot_market_id_drift() {
+    let g = group();
+    let mut bad = MarketGroupV16Account::from_runtime(&g);
+    bad.asset_slots[0].backing_long.market_id = V16PodU64::new(g.assets[0].market_id + 1);
+
+    assert_eq!(
+        bad.try_to_runtime(),
+        Err(V16Error::InvalidConfig),
+        "zero-copy market state must reject backing buckets not bound to their asset slot"
+    );
+}
+
+#[test]
+fn v16_dynamic_market_header_and_slot_table_roundtrip_runtime_state() {
+    let g = group();
+    let header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(
+        &g,
+        g.config.max_portfolio_assets as usize,
+    )
+    .unwrap();
+    let slots = [
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+    ];
+
+    let decoded = header.try_to_runtime_with_slots(&slots).unwrap();
+    assert_eq!(decoded, g);
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len(4, 24).unwrap(),
+        core::mem::size_of::<MarketGroupV16HeaderAccount>()
+            + 4 * (core::mem::size_of::<EngineAssetSlotV16Account>() + 24)
+    );
+}
+
+#[test]
+fn v16_dynamic_header_activation_initializes_appended_slot_identity() {
+    let g = group();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 4).unwrap();
+    let mut appended_slot = EngineAssetSlotV16Account::default();
+    let market_id = header.next_market_id.get();
+
+    header
+        .activate_empty_asset_slot_not_atomic(3, &mut appended_slot, 123, 1)
+        .unwrap();
+
+    assert_eq!(appended_slot.asset.market_id.get(), market_id);
+    assert_eq!(appended_slot.asset.lifecycle, 2);
+    assert_eq!(appended_slot.asset.effective_price.get(), 123);
+    assert_eq!(appended_slot.asset.slot_last.get(), 1);
+    assert_eq!(appended_slot.backing_long.market_id.get(), market_id);
+    assert_eq!(appended_slot.backing_short.market_id.get(), market_id);
+    assert_eq!(header.next_market_id.get(), market_id + 1);
+    assert_eq!(header.current_slot.get(), 1);
+    assert_eq!(
+        header.asset_activation_count.get(),
+        g.asset_activation_count + 1
+    );
+}
+
+#[test]
+fn v16_dynamic_header_activation_rejects_nonempty_disabled_slot() {
+    let g = group();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 4).unwrap();
+    let mut corrupt_slot = EngineAssetSlotV16Account::default();
+    corrupt_slot.asset.oi_eff_long_q = V16PodU128::new(1);
+    corrupt_slot.asset.stored_pos_count_long = V16PodU64::new(1);
+    corrupt_slot.asset.loss_weight_sum_long = V16PodU128::new(1);
+
+    assert_eq!(
+        header.activate_empty_asset_slot_not_atomic(3, &mut corrupt_slot, 123, 1),
+        Err(V16Error::LockActive),
+        "slot activation must not overwrite hidden OI/counter state in a disabled slot"
+    );
+}
+
+#[test]
+fn v16_dynamic_slot_table_rejects_backing_identity_drift() {
+    let g = group();
+    let header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 4).unwrap();
+    let mut slots = [
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+    ];
+    slots[2].backing_short.market_id = V16PodU64::new(g.assets[2].market_id + 1);
+
+    assert_eq!(
+        header.try_to_runtime_with_slots(&slots),
+        Err(V16Error::InvalidConfig),
+        "dynamic slot decoding must fail closed if backing identity drifts from the asset slot"
+    );
 }
 
 #[test]

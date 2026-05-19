@@ -2,13 +2,13 @@
 
 use percolator::v16::{
     account_equity, risk_notional_ceil, AssetLifecycleV16, CloseProgressLedgerV16,
-    DeadLegForfeitOutcomeV16, HLockLaneV16, HealthCertV16, LiquidationRequestV16, MarketGroupV16,
-    MarketGroupV16Account, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
-    PortfolioLegV16, ProvenanceHeaderV16, RebalanceRequestV16, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16,
-    SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TradeRequestV16,
+    DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    LiquidationRequestV16, MarketGroupV16, MarketGroupV16Account, MarketGroupV16HeaderAccount,
+    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
+    PortfolioAccountV16Account, PortfolioLegV16, ProvenanceHeaderV16, RebalanceRequestV16,
+    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
+    SideV16, SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TradeRequestV16,
     V16ActiveBitmap, V16Config, V16Error, V16PodI128, V16PodU64, V16_DOMAIN_COUNT,
     V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -1256,7 +1256,7 @@ fn proof_v16_persisted_wire_rejects_noncanonical_bool_enum_and_option() {
     );
 
     let mut side_mode_wire = MarketGroupV16Account::from_runtime(&group);
-    side_mode_wire.assets[0].mode_long = bad_side_mode;
+    side_mode_wire.asset_slots[0].asset.mode_long = bad_side_mode;
     kani::cover!(
         bad_side_mode == 3,
         "v16 persisted invalid side mode branch reachable"
@@ -1273,6 +1273,36 @@ fn proof_v16_persisted_wire_rejects_noncanonical_bool_enum_and_option() {
         "v16 persisted invalid option-present branch reachable"
     );
     assert_eq!(option_wire.try_to_runtime(), Err(V16Error::InvalidConfig));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_engine_asset_slot_validation_rejects_backing_market_id_drift() {
+    let corrupt_short: bool = kani::any();
+    let (market, _, _) = symbolic_ids();
+    let group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut slot = EngineAssetSlotV16Account::from_runtime_group_slot(&group, 0).unwrap();
+    let wrong_market_id = group.assets[0].market_id.checked_add(1).unwrap();
+
+    if corrupt_short {
+        slot.backing_short.market_id = V16PodU64::new(wrong_market_id);
+    } else {
+        slot.backing_long.market_id = V16PodU64::new(wrong_market_id);
+    }
+
+    kani::cover!(
+        !corrupt_short,
+        "v16 persisted backing long market-id drift reachable"
+    );
+    kani::cover!(
+        corrupt_short,
+        "v16 persisted backing short market-id drift reachable"
+    );
+    assert_eq!(
+        slot.validate_market_id_binding(),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[kani::proof]
@@ -1622,12 +1652,12 @@ fn proof_v16_persisted_wire_rejects_i128_min_economic_fields() {
     match dirty_case {
         0 => {
             let mut wire = MarketGroupV16Account::from_runtime(&group);
-            wire.assets[0].k_long = V16PodI128::new(i128::MIN);
+            wire.asset_slots[0].asset.k_long = V16PodI128::new(i128::MIN);
             assert_eq!(wire.try_to_runtime(), Err(V16Error::ArithmeticOverflow));
         }
         1 => {
             let mut wire = MarketGroupV16Account::from_runtime(&group);
-            wire.assets[0].f_short_num = V16PodI128::new(i128::MIN);
+            wire.asset_slots[0].asset.f_short_num = V16PodI128::new(i128::MIN);
             assert_eq!(wire.try_to_runtime(), Err(V16Error::ArithmeticOverflow));
         }
         2 => {
@@ -3328,6 +3358,14 @@ fn proof_v16_asset_activation_requires_empty_slot_and_bumps_epochs() {
         assert_eq!(group.assets[0].raw_oracle_target_price, 7);
         assert_eq!(group.assets[0].fund_px_last, 7);
         assert_eq!(group.assets[0].slot_last, 2);
+        assert_eq!(
+            group.source_backing_buckets[0].market_id,
+            group.assets[0].market_id
+        );
+        assert_eq!(
+            group.source_backing_buckets[1].market_id,
+            group.assets[0].market_id
+        );
         assert_eq!(group.risk_epoch, before.risk_epoch + 1);
         assert_eq!(group.asset_set_epoch, before.asset_set_epoch + 1);
         assert_eq!(
@@ -3335,6 +3373,80 @@ fn proof_v16_asset_activation_requires_empty_slot_and_bumps_epochs() {
             before.asset_activation_count + 1
         );
         assert_eq!(group.last_asset_activation_slot, 2);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_bucket_market_id_must_match_asset_slot() {
+    let (market, _, _) = symbolic_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let corrupt_side: bool = kani::any();
+    let asset_market_id = group.assets[0].market_id;
+
+    kani::cover!(
+        !corrupt_side,
+        "v16 backing long market-id mismatch reachable"
+    );
+    kani::cover!(
+        corrupt_side,
+        "v16 backing short market-id mismatch reachable"
+    );
+
+    if corrupt_side {
+        group.source_backing_buckets[1].market_id = asset_market_id.checked_add(1).unwrap();
+    } else {
+        group.source_backing_buckets[0].market_id = asset_market_id.checked_add(1).unwrap();
+    }
+
+    assert_eq!(
+        group.assert_public_invariants(),
+        Err(V16Error::InvalidConfig)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_dynamic_header_activation_binds_backing_to_new_market_id() {
+    let nonempty: bool = kani::any();
+    let price = 7u64;
+    let (market, _, _) = concrete_ids();
+    let group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&group, 1).unwrap();
+    let mut slot = EngineAssetSlotV16Account::default();
+    if nonempty {
+        slot.asset.oi_eff_long_q = percolator::v16::V16PodU128::new(1);
+        slot.asset.stored_pos_count_long = V16PodU64::new(1);
+        slot.asset.loss_weight_sum_long = percolator::v16::V16PodU128::new(1);
+    }
+    let market_id = header.next_market_id.get();
+
+    let result =
+        header.activate_empty_asset_slot_not_atomic(0, &mut slot, price, group.current_slot);
+
+    kani::cover!(
+        price == 7,
+        "v16 dynamic activation proof exercises nonzero price"
+    );
+    kani::cover!(
+        !nonempty,
+        "v16 dynamic activation empty slot success reachable"
+    );
+    kani::cover!(
+        nonempty,
+        "v16 dynamic activation nonempty slot rejection reachable"
+    );
+    if nonempty {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert_eq!(header.next_market_id.get(), market_id);
+    } else {
+        assert_eq!(result, Ok(()));
+        assert_eq!(slot.asset.market_id.get(), market_id);
+        assert_eq!(slot.backing_long.market_id.get(), market_id);
+        assert_eq!(slot.backing_short.market_id.get(), market_id);
+        assert_eq!(header.next_market_id.get(), market_id + 1);
     }
 }
 

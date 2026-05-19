@@ -26,6 +26,20 @@ pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 16;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 
+#[inline]
+fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, usize)> {
+    let long_domain = asset_index
+        .checked_mul(2)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let short_domain = long_domain
+        .checked_add(1)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if short_domain >= V16_DOMAIN_COUNT {
+        return Err(V16Error::InvalidLeg);
+    }
+    Ok((long_domain, short_domain))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V16Error {
     InvalidConfig,
@@ -636,7 +650,7 @@ impl V16Config {
         )
     }
 
-    pub fn validate_public_user_fund(&self) -> V16Result<()> {
+    pub fn validate_public_user_fund_shape(&self) -> V16Result<()> {
         if self.max_portfolio_assets == 0
             || self.max_portfolio_assets as usize > V16_MAX_PORTFOLIO_ASSETS_N
         {
@@ -682,6 +696,11 @@ impl V16Config {
         {
             return Err(V16Error::InvalidConfig);
         }
+        Ok(())
+    }
+
+    pub fn validate_public_user_fund(&self) -> V16Result<()> {
+        self.validate_public_user_fund_shape()?;
         self.validate_exact_solvency_envelope()
     }
 }
@@ -821,6 +840,7 @@ impl Default for SourceCreditStateV16 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackingBucketV16 {
+    pub market_id: u64,
     pub fresh_unliened_backing_num: u128,
     pub valid_liened_backing_num: u128,
     pub consumed_liened_backing_num: u128,
@@ -831,6 +851,7 @@ pub struct BackingBucketV16 {
 
 impl BackingBucketV16 {
     pub const EMPTY: Self = Self {
+        market_id: 0,
         fresh_unliened_backing_num: 0,
         valid_liened_backing_num: 0,
         consumed_liened_backing_num: 0,
@@ -838,6 +859,27 @@ impl BackingBucketV16 {
         expiry_slot: 0,
         status: BackingBucketStatusV16::Empty,
     };
+
+    pub const fn empty_for_market(market_id: u64) -> Self {
+        Self {
+            market_id,
+            fresh_unliened_backing_num: 0,
+            valid_liened_backing_num: 0,
+            consumed_liened_backing_num: 0,
+            impaired_liened_backing_num: 0,
+            expiry_slot: 0,
+            status: BackingBucketStatusV16::Empty,
+        }
+    }
+
+    fn is_empty_amount_shape(self) -> bool {
+        self.fresh_unliened_backing_num == 0
+            && self.valid_liened_backing_num == 0
+            && self.consumed_liened_backing_num == 0
+            && self.impaired_liened_backing_num == 0
+            && self.expiry_slot == 0
+            && self.status == BackingBucketStatusV16::Empty
+    }
 }
 
 impl Default for BackingBucketV16 {
@@ -870,6 +912,32 @@ impl Default for InsuranceCreditReservationV16 {
     fn default() -> Self {
         Self::EMPTY
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineAssetSlotV16<WrapperExt> {
+    pub asset: AssetStateV16,
+    pub insurance_domain_budget_long: u128,
+    pub insurance_domain_budget_short: u128,
+    pub insurance_domain_spent_long: u128,
+    pub insurance_domain_spent_short: u128,
+    pub pending_domain_loss_barrier_long: u64,
+    pub pending_domain_loss_barrier_short: u64,
+    pub source_credit_long: SourceCreditStateV16,
+    pub source_credit_short: SourceCreditStateV16,
+    pub backing_long: BackingBucketV16,
+    pub backing_short: BackingBucketV16,
+    pub insurance_reservation_long: InsuranceCreditReservationV16,
+    pub insurance_reservation_short: InsuranceCreditReservationV16,
+    pub ext: WrapperExt,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineAssetSlotWithExtV16Account<WrapperExt> {
+    pub engine: EngineAssetSlotV16Account,
+    pub ext: WrapperExt,
 }
 
 #[repr(C)]
@@ -2049,6 +2117,7 @@ impl SourceCreditStateV16Account {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct BackingBucketV16Account {
+    pub market_id: V16PodU64,
     pub fresh_unliened_backing_num: V16PodU128,
     pub valid_liened_backing_num: V16PodU128,
     pub consumed_liened_backing_num: V16PodU128,
@@ -2060,6 +2129,7 @@ pub struct BackingBucketV16Account {
 impl BackingBucketV16Account {
     pub fn from_runtime(value: &BackingBucketV16) -> Self {
         Self {
+            market_id: V16PodU64::new(value.market_id),
             fresh_unliened_backing_num: V16PodU128::new(value.fresh_unliened_backing_num),
             valid_liened_backing_num: V16PodU128::new(value.valid_liened_backing_num),
             consumed_liened_backing_num: V16PodU128::new(value.consumed_liened_backing_num),
@@ -2071,6 +2141,7 @@ impl BackingBucketV16Account {
 
     pub fn try_to_runtime(&self) -> V16Result<BackingBucketV16> {
         let out = BackingBucketV16 {
+            market_id: self.market_id.get(),
             fresh_unliened_backing_num: self.fresh_unliened_backing_num.get(),
             valid_liened_backing_num: self.valid_liened_backing_num.get(),
             consumed_liened_backing_num: self.consumed_liened_backing_num.get(),
@@ -2263,6 +2334,493 @@ impl AssetStateV16Account {
         validate_non_min_i128(out.f_epoch_start_long_num)?;
         validate_non_min_i128(out.f_epoch_start_short_num)?;
         Ok(out)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
+pub struct EngineAssetSlotV16Account {
+    pub asset: AssetStateV16Account,
+    pub insurance_domain_budget_long: V16PodU128,
+    pub insurance_domain_budget_short: V16PodU128,
+    pub insurance_domain_spent_long: V16PodU128,
+    pub insurance_domain_spent_short: V16PodU128,
+    pub pending_domain_loss_barrier_long: V16PodU64,
+    pub pending_domain_loss_barrier_short: V16PodU64,
+    pub source_credit_long: SourceCreditStateV16Account,
+    pub source_credit_short: SourceCreditStateV16Account,
+    pub backing_long: BackingBucketV16Account,
+    pub backing_short: BackingBucketV16Account,
+    pub insurance_reservation_long: InsuranceCreditReservationV16Account,
+    pub insurance_reservation_short: InsuranceCreditReservationV16Account,
+}
+
+impl EngineAssetSlotV16Account {
+    #[cfg(not(target_os = "solana"))]
+    pub fn from_runtime_group_slot(value: &MarketGroupV16, asset_index: usize) -> V16Result<Self> {
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)?;
+        Ok(Self {
+            asset: AssetStateV16Account::from_runtime(&value.assets[asset_index]),
+            insurance_domain_budget_long: V16PodU128::new(
+                value.insurance_domain_budget[long_domain],
+            ),
+            insurance_domain_budget_short: V16PodU128::new(
+                value.insurance_domain_budget[short_domain],
+            ),
+            insurance_domain_spent_long: V16PodU128::new(value.insurance_domain_spent[long_domain]),
+            insurance_domain_spent_short: V16PodU128::new(
+                value.insurance_domain_spent[short_domain],
+            ),
+            pending_domain_loss_barrier_long: V16PodU64::new(
+                value.pending_domain_loss_barriers[long_domain],
+            ),
+            pending_domain_loss_barrier_short: V16PodU64::new(
+                value.pending_domain_loss_barriers[short_domain],
+            ),
+            source_credit_long: SourceCreditStateV16Account::from_runtime(
+                &value.source_credit[long_domain],
+            ),
+            source_credit_short: SourceCreditStateV16Account::from_runtime(
+                &value.source_credit[short_domain],
+            ),
+            backing_long: BackingBucketV16Account::from_runtime(
+                &value.source_backing_buckets[long_domain],
+            ),
+            backing_short: BackingBucketV16Account::from_runtime(
+                &value.source_backing_buckets[short_domain],
+            ),
+            insurance_reservation_long: InsuranceCreditReservationV16Account::from_runtime(
+                &value.insurance_credit_reservations[long_domain],
+            ),
+            insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
+                &value.insurance_credit_reservations[short_domain],
+            ),
+        })
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    pub fn write_runtime_group_slot(
+        &self,
+        value: &mut MarketGroupV16,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)?;
+        value.assets[asset_index] = self.asset.try_to_runtime()?;
+        value.insurance_domain_budget[long_domain] = self.insurance_domain_budget_long.get();
+        value.insurance_domain_budget[short_domain] = self.insurance_domain_budget_short.get();
+        value.insurance_domain_spent[long_domain] = self.insurance_domain_spent_long.get();
+        value.insurance_domain_spent[short_domain] = self.insurance_domain_spent_short.get();
+        value.pending_domain_loss_barriers[long_domain] =
+            self.pending_domain_loss_barrier_long.get();
+        value.pending_domain_loss_barriers[short_domain] =
+            self.pending_domain_loss_barrier_short.get();
+        value.source_credit[long_domain] = self.source_credit_long.try_to_runtime()?;
+        value.source_credit[short_domain] = self.source_credit_short.try_to_runtime()?;
+        value.source_backing_buckets[long_domain] = self.backing_long.try_to_runtime()?;
+        value.source_backing_buckets[short_domain] = self.backing_short.try_to_runtime()?;
+        value.insurance_credit_reservations[long_domain] =
+            self.insurance_reservation_long.try_to_runtime()?;
+        value.insurance_credit_reservations[short_domain] =
+            self.insurance_reservation_short.try_to_runtime()?;
+        self.validate_market_id_binding()
+    }
+
+    pub fn validate_market_id_binding(&self) -> V16Result<()> {
+        let asset = self.asset.try_to_runtime()?;
+        let long_bucket = self.backing_long.try_to_runtime()?;
+        let short_bucket = self.backing_short.try_to_runtime()?;
+        if long_bucket.market_id != asset.market_id || short_bucket.market_id != asset.market_id {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(())
+    }
+
+    pub fn empty_for_market(market_id: u64) -> Self {
+        let backing = BackingBucketV16::empty_for_market(market_id);
+        Self {
+            asset: AssetStateV16Account::default(),
+            insurance_domain_budget_long: V16PodU128::new(MAX_VAULT_TVL),
+            insurance_domain_budget_short: V16PodU128::new(MAX_VAULT_TVL),
+            insurance_domain_spent_long: V16PodU128::default(),
+            insurance_domain_spent_short: V16PodU128::default(),
+            pending_domain_loss_barrier_long: V16PodU64::default(),
+            pending_domain_loss_barrier_short: V16PodU64::default(),
+            source_credit_long: SourceCreditStateV16Account::from_runtime(
+                &SourceCreditStateV16::EMPTY,
+            ),
+            source_credit_short: SourceCreditStateV16Account::from_runtime(
+                &SourceCreditStateV16::EMPTY,
+            ),
+            backing_long: BackingBucketV16Account::from_runtime(&backing),
+            backing_short: BackingBucketV16Account::from_runtime(&backing),
+            insurance_reservation_long: InsuranceCreditReservationV16Account::from_runtime(
+                &InsuranceCreditReservationV16::EMPTY,
+            ),
+            insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
+                &InsuranceCreditReservationV16::EMPTY,
+            ),
+        }
+    }
+
+    fn source_credit_account_is_empty_for_activation(state: SourceCreditStateV16Account) -> bool {
+        let zeroed = state == SourceCreditStateV16Account::default();
+        let canonical = state
+            .try_to_runtime()
+            .map(|runtime| runtime == SourceCreditStateV16::EMPTY)
+            .unwrap_or(false);
+        zeroed || canonical
+    }
+
+    fn asset_state_is_empty_for_activation(asset: AssetStateV16) -> bool {
+        let a_shape = (asset.a_long == 0 && asset.a_short == 0)
+            || (asset.a_long == ADL_ONE && asset.a_short == ADL_ONE);
+        a_shape
+            && asset.k_long == 0
+            && asset.k_short == 0
+            && asset.f_long_num == 0
+            && asset.f_short_num == 0
+            && asset.k_epoch_start_long == 0
+            && asset.k_epoch_start_short == 0
+            && asset.f_epoch_start_long_num == 0
+            && asset.f_epoch_start_short_num == 0
+            && asset.b_long_num == 0
+            && asset.b_short_num == 0
+            && asset.b_epoch_start_long_num == 0
+            && asset.b_epoch_start_short_num == 0
+            && asset.oi_eff_long_q == 0
+            && asset.oi_eff_short_q == 0
+            && asset.stored_pos_count_long == 0
+            && asset.stored_pos_count_short == 0
+            && asset.stale_account_count_long == 0
+            && asset.stale_account_count_short == 0
+            && asset.pending_obligation_count_long == 0
+            && asset.pending_obligation_count_short == 0
+            && asset.loss_weight_sum_long == 0
+            && asset.loss_weight_sum_short == 0
+            && asset.social_loss_remainder_long_num == 0
+            && asset.social_loss_remainder_short_num == 0
+            && asset.social_loss_dust_long_num == 0
+            && asset.social_loss_dust_short_num == 0
+            && asset.explicit_unallocated_loss_long == 0
+            && asset.explicit_unallocated_loss_short == 0
+            && asset.mode_long == SideModeV16::Normal
+            && asset.mode_short == SideModeV16::Normal
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
+pub struct MarketGroupV16HeaderAccount {
+    pub market_group_id: [u8; 32],
+    pub config: V16ConfigAccount,
+    pub asset_slot_capacity: V16PodU32,
+    pub vault: V16PodU128,
+    pub insurance: V16PodU128,
+    pub c_tot: V16PodU128,
+    pub pnl_pos_tot: V16PodU128,
+    pub pnl_pos_bound_tot_num: V16PodU128,
+    pub pnl_pos_bound_tot: V16PodU128,
+    pub pnl_matured_pos_tot: V16PodU128,
+    pub materialized_portfolio_count: V16PodU64,
+    pub stale_certificate_count: V16PodU64,
+    pub b_stale_account_count: V16PodU64,
+    pub negative_pnl_account_count: V16PodU64,
+    pub risk_epoch: V16PodU64,
+    pub asset_set_epoch: V16PodU64,
+    pub asset_activation_count: V16PodU64,
+    pub last_asset_activation_slot: V16PodU64,
+    pub next_market_id: V16PodU64,
+    pub oracle_epoch: V16PodU64,
+    pub funding_epoch: V16PodU64,
+    pub slot_last: V16PodU64,
+    pub current_slot: V16PodU64,
+    pub bankruptcy_hlock_active: u8,
+    pub threshold_stress_active: u8,
+    pub loss_stale_active: u8,
+    pub recovery_reason: V16OptionalRecoveryReasonAccount,
+    pub mode: u8,
+    pub resolved_slot: V16PodU64,
+    pub payout_snapshot: V16PodU128,
+    pub payout_snapshot_pnl_pos_tot: V16PodU128,
+    pub payout_snapshot_captured: u8,
+    pub resolved_payout_ledger: ResolvedPayoutLedgerV16Account,
+}
+
+impl Default for MarketGroupV16HeaderAccount {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
+}
+
+impl MarketGroupV16HeaderAccount {
+    pub fn dynamic_market_group_account_len(
+        asset_slot_capacity: usize,
+        wrapper_ext_len: usize,
+    ) -> V16Result<usize> {
+        let slot_len = core::mem::size_of::<EngineAssetSlotV16Account>()
+            .checked_add(wrapper_ext_len)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        core::mem::size_of::<Self>()
+            .checked_add(
+                asset_slot_capacity
+                    .checked_mul(slot_len)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            )
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    pub fn from_runtime_with_capacity(
+        value: &MarketGroupV16,
+        asset_slot_capacity: usize,
+    ) -> V16Result<Self> {
+        if asset_slot_capacity > u32::MAX as usize
+            || asset_slot_capacity < value.config.max_portfolio_assets as usize
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(Self {
+            market_group_id: value.market_group_id,
+            config: V16ConfigAccount::from_runtime(&value.config),
+            asset_slot_capacity: V16PodU32::new(asset_slot_capacity as u32),
+            vault: V16PodU128::new(value.vault),
+            insurance: V16PodU128::new(value.insurance),
+            c_tot: V16PodU128::new(value.c_tot),
+            pnl_pos_tot: V16PodU128::new(value.pnl_pos_tot),
+            pnl_pos_bound_tot_num: V16PodU128::new(value.pnl_pos_bound_tot_num),
+            pnl_pos_bound_tot: V16PodU128::new(value.pnl_pos_bound_tot),
+            pnl_matured_pos_tot: V16PodU128::new(value.pnl_matured_pos_tot),
+            materialized_portfolio_count: V16PodU64::new(value.materialized_portfolio_count),
+            stale_certificate_count: V16PodU64::new(value.stale_certificate_count),
+            b_stale_account_count: V16PodU64::new(value.b_stale_account_count),
+            negative_pnl_account_count: V16PodU64::new(value.negative_pnl_account_count),
+            risk_epoch: V16PodU64::new(value.risk_epoch),
+            asset_set_epoch: V16PodU64::new(value.asset_set_epoch),
+            asset_activation_count: V16PodU64::new(value.asset_activation_count),
+            last_asset_activation_slot: V16PodU64::new(value.last_asset_activation_slot),
+            next_market_id: V16PodU64::new(value.next_market_id),
+            oracle_epoch: V16PodU64::new(value.oracle_epoch),
+            funding_epoch: V16PodU64::new(value.funding_epoch),
+            slot_last: V16PodU64::new(value.slot_last),
+            current_slot: V16PodU64::new(value.current_slot),
+            bankruptcy_hlock_active: encode_bool(value.bankruptcy_hlock_active),
+            threshold_stress_active: encode_bool(value.threshold_stress_active),
+            loss_stale_active: encode_bool(value.loss_stale_active),
+            recovery_reason: V16OptionalRecoveryReasonAccount::from_runtime(value.recovery_reason),
+            mode: encode_market_mode(value.mode),
+            resolved_slot: V16PodU64::new(value.resolved_slot),
+            payout_snapshot: V16PodU128::new(value.payout_snapshot),
+            payout_snapshot_pnl_pos_tot: V16PodU128::new(value.payout_snapshot_pnl_pos_tot),
+            payout_snapshot_captured: encode_bool(value.payout_snapshot_captured),
+            resolved_payout_ledger: ResolvedPayoutLedgerV16Account::from_runtime(
+                &value.resolved_payout_ledger,
+            ),
+        })
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    pub fn try_to_runtime_with_slots(
+        &self,
+        slots: &[EngineAssetSlotV16Account],
+    ) -> V16Result<MarketGroupV16> {
+        let config = self.config.try_to_runtime()?;
+        let capacity = self.asset_slot_capacity.get() as usize;
+        if slots.len() != capacity
+            || capacity != config.max_portfolio_assets as usize
+            || capacity > V16_MAX_PORTFOLIO_ASSETS_N
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let mut assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut i = 0usize;
+        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+            assets[i].lifecycle = AssetLifecycleV16::Disabled;
+            assets[i].market_id = 0;
+            i += 1;
+        }
+        let mut out = MarketGroupV16 {
+            market_group_id: self.market_group_id,
+            config,
+            vault: self.vault.get(),
+            insurance: self.insurance.get(),
+            c_tot: self.c_tot.get(),
+            pnl_pos_tot: self.pnl_pos_tot.get(),
+            pnl_pos_bound_tot_num: self.pnl_pos_bound_tot_num.get(),
+            pnl_pos_bound_tot: self.pnl_pos_bound_tot.get(),
+            pnl_matured_pos_tot: self.pnl_matured_pos_tot.get(),
+            insurance_domain_budget: [MAX_VAULT_TVL; V16_DOMAIN_COUNT],
+            insurance_domain_spent: [0; V16_DOMAIN_COUNT],
+            pending_domain_loss_barriers: [0; V16_DOMAIN_COUNT],
+            source_credit: [SourceCreditStateV16::EMPTY; V16_DOMAIN_COUNT],
+            source_backing_buckets: [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT],
+            insurance_credit_reservations: [InsuranceCreditReservationV16::EMPTY; V16_DOMAIN_COUNT],
+            materialized_portfolio_count: self.materialized_portfolio_count.get(),
+            stale_certificate_count: self.stale_certificate_count.get(),
+            b_stale_account_count: self.b_stale_account_count.get(),
+            negative_pnl_account_count: self.negative_pnl_account_count.get(),
+            risk_epoch: self.risk_epoch.get(),
+            asset_set_epoch: self.asset_set_epoch.get(),
+            asset_activation_count: self.asset_activation_count.get(),
+            last_asset_activation_slot: self.last_asset_activation_slot.get(),
+            next_market_id: self.next_market_id.get(),
+            oracle_epoch: self.oracle_epoch.get(),
+            funding_epoch: self.funding_epoch.get(),
+            slot_last: self.slot_last.get(),
+            current_slot: self.current_slot.get(),
+            assets,
+            bankruptcy_hlock_active: decode_bool(self.bankruptcy_hlock_active)?,
+            threshold_stress_active: decode_bool(self.threshold_stress_active)?,
+            loss_stale_active: decode_bool(self.loss_stale_active)?,
+            recovery_reason: self.recovery_reason.try_to_runtime()?,
+            mode: decode_market_mode(self.mode)?,
+            resolved_slot: self.resolved_slot.get(),
+            payout_snapshot: self.payout_snapshot.get(),
+            payout_snapshot_pnl_pos_tot: self.payout_snapshot_pnl_pos_tot.get(),
+            payout_snapshot_captured: decode_bool(self.payout_snapshot_captured)?,
+            resolved_payout_ledger: self.resolved_payout_ledger.try_to_runtime()?,
+        };
+        let mut slot_index = 0usize;
+        while slot_index < slots.len() {
+            slots[slot_index].write_runtime_group_slot(&mut out, slot_index)?;
+            slot_index += 1;
+        }
+        out.assert_public_invariants()?;
+        Ok(out)
+    }
+
+    pub fn activate_empty_asset_slot_not_atomic(
+        &mut self,
+        asset_index: u32,
+        slot: &mut EngineAssetSlotV16Account,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        let config = self.config.try_to_runtime()?;
+        let capacity = self.asset_slot_capacity.get();
+        if asset_index >= capacity || asset_index as usize >= config.max_portfolio_assets as usize {
+            return Err(V16Error::InvalidLeg);
+        }
+        if decode_market_mode(self.mode)? != MarketModeV16::Live
+            || authenticated_price == 0
+            || authenticated_price > MAX_ORACLE_PRICE
+            || now_slot < self.current_slot.get()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        config.validate_public_user_fund_shape()?;
+        if self.asset_activation_count.get() != 0 {
+            let elapsed = now_slot
+                .checked_sub(self.last_asset_activation_slot.get())
+                .ok_or(V16Error::Stale)?;
+            if elapsed < config.asset_activation_cooldown_slots {
+                return Err(V16Error::LockActive);
+            }
+        }
+        let previous_asset = slot.asset.try_to_runtime()?;
+        if !EngineAssetSlotV16Account::asset_state_is_empty_for_activation(previous_asset) {
+            return Err(V16Error::LockActive);
+        }
+        match previous_asset.lifecycle {
+            AssetLifecycleV16::Disabled => {
+                if previous_asset.market_id != 0 {
+                    return Err(V16Error::LockActive);
+                }
+            }
+            AssetLifecycleV16::Retired => {
+                if previous_asset.market_id == 0 || previous_asset.retired_slot == 0 {
+                    return Err(V16Error::LockActive);
+                }
+                let elapsed = now_slot
+                    .checked_sub(previous_asset.retired_slot)
+                    .ok_or(V16Error::Stale)?;
+                if elapsed < config.asset_activation_cooldown_slots {
+                    return Err(V16Error::LockActive);
+                }
+                slot.validate_market_id_binding()?;
+            }
+            _ => return Err(V16Error::LockActive),
+        }
+        if slot.insurance_domain_spent_long.get() != 0
+            || slot.insurance_domain_spent_short.get() != 0
+            || slot.pending_domain_loss_barrier_long.get() != 0
+            || slot.pending_domain_loss_barrier_short.get() != 0
+            || !EngineAssetSlotV16Account::source_credit_account_is_empty_for_activation(
+                slot.source_credit_long,
+            )
+            || !EngineAssetSlotV16Account::source_credit_account_is_empty_for_activation(
+                slot.source_credit_short,
+            )
+            || !slot.backing_long.try_to_runtime()?.is_empty_amount_shape()
+            || !slot.backing_short.try_to_runtime()?.is_empty_amount_shape()
+            || slot.insurance_reservation_long.try_to_runtime()?
+                != InsuranceCreditReservationV16::EMPTY
+            || slot.insurance_reservation_short.try_to_runtime()?
+                != InsuranceCreditReservationV16::EMPTY
+        {
+            return Err(V16Error::LockActive);
+        }
+
+        let market_id = self.next_market_id.get();
+        if market_id == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let mut asset = AssetStateV16::default();
+        asset.market_id = market_id;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = authenticated_price;
+        asset.effective_price = authenticated_price;
+        asset.fund_px_last = authenticated_price;
+        asset.slot_last = now_slot;
+        *slot = EngineAssetSlotV16Account {
+            asset: AssetStateV16Account::from_runtime(&asset),
+            insurance_domain_budget_long: V16PodU128::new(MAX_VAULT_TVL),
+            insurance_domain_budget_short: V16PodU128::new(MAX_VAULT_TVL),
+            insurance_domain_spent_long: V16PodU128::default(),
+            insurance_domain_spent_short: V16PodU128::default(),
+            pending_domain_loss_barrier_long: V16PodU64::default(),
+            pending_domain_loss_barrier_short: V16PodU64::default(),
+            source_credit_long: SourceCreditStateV16Account::from_runtime(
+                &SourceCreditStateV16::EMPTY,
+            ),
+            source_credit_short: SourceCreditStateV16Account::from_runtime(
+                &SourceCreditStateV16::EMPTY,
+            ),
+            backing_long: BackingBucketV16Account::from_runtime(
+                &BackingBucketV16::empty_for_market(market_id),
+            ),
+            backing_short: BackingBucketV16Account::from_runtime(
+                &BackingBucketV16::empty_for_market(market_id),
+            ),
+            insurance_reservation_long: InsuranceCreditReservationV16Account::from_runtime(
+                &InsuranceCreditReservationV16::EMPTY,
+            ),
+            insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
+                &InsuranceCreditReservationV16::EMPTY,
+            ),
+        };
+        self.next_market_id =
+            V16PodU64::new(market_id.checked_add(1).ok_or(V16Error::CounterOverflow)?);
+        self.current_slot = V16PodU64::new(now_slot);
+        self.asset_activation_count = V16PodU64::new(
+            self.asset_activation_count
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.last_asset_activation_slot = V16PodU64::new(now_slot);
+        self.asset_set_epoch = V16PodU64::new(
+            self.asset_set_epoch
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.risk_epoch = V16PodU64::new(
+            self.risk_epoch
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        Ok(())
     }
 }
 
@@ -2753,12 +3311,6 @@ pub struct MarketGroupV16Account {
     pub pnl_pos_bound_tot_num: V16PodU128,
     pub pnl_pos_bound_tot: V16PodU128,
     pub pnl_matured_pos_tot: V16PodU128,
-    pub insurance_domain_budget: [V16PodU128; V16_DOMAIN_COUNT],
-    pub insurance_domain_spent: [V16PodU128; V16_DOMAIN_COUNT],
-    pub pending_domain_loss_barriers: [V16PodU64; V16_DOMAIN_COUNT],
-    pub source_credit: [SourceCreditStateV16Account; V16_DOMAIN_COUNT],
-    pub source_backing_buckets: [BackingBucketV16Account; V16_DOMAIN_COUNT],
-    pub insurance_credit_reservations: [InsuranceCreditReservationV16Account; V16_DOMAIN_COUNT],
     pub materialized_portfolio_count: V16PodU64,
     pub stale_certificate_count: V16PodU64,
     pub b_stale_account_count: V16PodU64,
@@ -2772,7 +3324,7 @@ pub struct MarketGroupV16Account {
     pub funding_epoch: V16PodU64,
     pub slot_last: V16PodU64,
     pub current_slot: V16PodU64,
-    pub assets: [AssetStateV16Account; V16_MAX_PORTFOLIO_ASSETS_N],
+    pub asset_slots: [EngineAssetSlotV16Account; V16_MAX_PORTFOLIO_ASSETS_N],
     pub bankruptcy_hlock_active: u8,
     pub threshold_stress_active: u8,
     pub loss_stale_active: u8,
@@ -2794,31 +3346,11 @@ impl Default for MarketGroupV16Account {
 impl MarketGroupV16Account {
     #[cfg(not(target_os = "solana"))]
     pub fn from_runtime(value: &MarketGroupV16) -> Self {
-        let mut assets = [AssetStateV16Account::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut asset_slots = [EngineAssetSlotV16Account::default(); V16_MAX_PORTFOLIO_ASSETS_N];
         let mut i = 0;
         while i < V16_MAX_PORTFOLIO_ASSETS_N {
-            assets[i] = AssetStateV16Account::from_runtime(&value.assets[i]);
+            asset_slots[i] = EngineAssetSlotV16Account::from_runtime_group_slot(value, i).unwrap();
             i += 1;
-        }
-        let mut insurance_domain_budget = [V16PodU128::default(); V16_DOMAIN_COUNT];
-        let mut insurance_domain_spent = [V16PodU128::default(); V16_DOMAIN_COUNT];
-        let mut pending_domain_loss_barriers = [V16PodU64::default(); V16_DOMAIN_COUNT];
-        let mut source_credit = [SourceCreditStateV16Account::default(); V16_DOMAIN_COUNT];
-        let mut source_backing_buckets = [BackingBucketV16Account::default(); V16_DOMAIN_COUNT];
-        let mut insurance_credit_reservations =
-            [InsuranceCreditReservationV16Account::default(); V16_DOMAIN_COUNT];
-        let mut d = 0;
-        while d < V16_DOMAIN_COUNT {
-            insurance_domain_budget[d] = V16PodU128::new(value.insurance_domain_budget[d]);
-            insurance_domain_spent[d] = V16PodU128::new(value.insurance_domain_spent[d]);
-            pending_domain_loss_barriers[d] = V16PodU64::new(value.pending_domain_loss_barriers[d]);
-            source_credit[d] = SourceCreditStateV16Account::from_runtime(&value.source_credit[d]);
-            source_backing_buckets[d] =
-                BackingBucketV16Account::from_runtime(&value.source_backing_buckets[d]);
-            insurance_credit_reservations[d] = InsuranceCreditReservationV16Account::from_runtime(
-                &value.insurance_credit_reservations[d],
-            );
-            d += 1;
         }
         Self {
             market_group_id: value.market_group_id,
@@ -2830,12 +3362,6 @@ impl MarketGroupV16Account {
             pnl_pos_bound_tot_num: V16PodU128::new(value.pnl_pos_bound_tot_num),
             pnl_pos_bound_tot: V16PodU128::new(value.pnl_pos_bound_tot),
             pnl_matured_pos_tot: V16PodU128::new(value.pnl_matured_pos_tot),
-            insurance_domain_budget,
-            insurance_domain_spent,
-            pending_domain_loss_barriers,
-            source_credit,
-            source_backing_buckets,
-            insurance_credit_reservations,
             materialized_portfolio_count: V16PodU64::new(value.materialized_portfolio_count),
             stale_certificate_count: V16PodU64::new(value.stale_certificate_count),
             b_stale_account_count: V16PodU64::new(value.b_stale_account_count),
@@ -2849,7 +3375,7 @@ impl MarketGroupV16Account {
             funding_epoch: V16PodU64::new(value.funding_epoch),
             slot_last: V16PodU64::new(value.slot_last),
             current_slot: V16PodU64::new(value.current_slot),
-            assets,
+            asset_slots,
             bankruptcy_hlock_active: encode_bool(value.bankruptcy_hlock_active),
             threshold_stress_active: encode_bool(value.threshold_stress_active),
             loss_stale_active: encode_bool(value.loss_stale_active),
@@ -2867,30 +3393,14 @@ impl MarketGroupV16Account {
 
     #[cfg(not(target_os = "solana"))]
     pub fn try_to_runtime(&self) -> V16Result<MarketGroupV16> {
-        let mut assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut i = 0;
-        while i < V16_MAX_PORTFOLIO_ASSETS_N {
-            assets[i] = self.assets[i].try_to_runtime()?;
-            i += 1;
-        }
-        let mut insurance_domain_budget = [0u128; V16_DOMAIN_COUNT];
-        let mut insurance_domain_spent = [0u128; V16_DOMAIN_COUNT];
-        let mut pending_domain_loss_barriers = [0u64; V16_DOMAIN_COUNT];
-        let mut source_credit = [SourceCreditStateV16::EMPTY; V16_DOMAIN_COUNT];
-        let mut source_backing_buckets = [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT];
-        let mut insurance_credit_reservations =
+        let assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let insurance_domain_budget = [0u128; V16_DOMAIN_COUNT];
+        let insurance_domain_spent = [0u128; V16_DOMAIN_COUNT];
+        let pending_domain_loss_barriers = [0u64; V16_DOMAIN_COUNT];
+        let source_credit = [SourceCreditStateV16::EMPTY; V16_DOMAIN_COUNT];
+        let source_backing_buckets = [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT];
+        let insurance_credit_reservations =
             [InsuranceCreditReservationV16::EMPTY; V16_DOMAIN_COUNT];
-        let mut d = 0;
-        while d < V16_DOMAIN_COUNT {
-            insurance_domain_budget[d] = self.insurance_domain_budget[d].get();
-            insurance_domain_spent[d] = self.insurance_domain_spent[d].get();
-            pending_domain_loss_barriers[d] = self.pending_domain_loss_barriers[d].get();
-            source_credit[d] = self.source_credit[d].try_to_runtime()?;
-            source_backing_buckets[d] = self.source_backing_buckets[d].try_to_runtime()?;
-            insurance_credit_reservations[d] =
-                self.insurance_credit_reservations[d].try_to_runtime()?;
-            d += 1;
-        }
         let out = MarketGroupV16 {
             market_group_id: self.market_group_id,
             config: self.config.try_to_runtime()?,
@@ -2932,6 +3442,12 @@ impl MarketGroupV16Account {
             payout_snapshot_captured: decode_bool(self.payout_snapshot_captured)?,
             resolved_payout_ledger: self.resolved_payout_ledger.try_to_runtime()?,
         };
+        let mut out = out;
+        let mut i = 0;
+        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+            self.asset_slots[i].write_runtime_group_slot(&mut out, i)?;
+            i += 1;
+        }
         out.assert_public_invariants()?;
         Ok(out)
     }
@@ -2948,10 +3464,16 @@ impl MarketGroupV16 {
         config.validate_public_user_fund()?;
         let n = config.max_portfolio_assets as usize;
         let mut assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut source_backing_buckets = [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT];
         let mut i = 0usize;
         while i < V16_MAX_PORTFOLIO_ASSETS_N {
             if i < n {
                 assets[i].market_id = (i as u64).checked_add(1).ok_or(V16Error::CounterOverflow)?;
+                let long_domain = i.checked_mul(2).ok_or(V16Error::CounterOverflow)?;
+                source_backing_buckets[long_domain] =
+                    BackingBucketV16::empty_for_market(assets[i].market_id);
+                source_backing_buckets[long_domain + 1] =
+                    BackingBucketV16::empty_for_market(assets[i].market_id);
             } else {
                 assets[i].lifecycle = AssetLifecycleV16::Disabled;
                 assets[i].market_id = 0;
@@ -2973,7 +3495,7 @@ impl MarketGroupV16 {
             insurance_domain_spent: [0; V16_DOMAIN_COUNT],
             pending_domain_loss_barriers: [0; V16_DOMAIN_COUNT],
             source_credit: [SourceCreditStateV16::EMPTY; V16_DOMAIN_COUNT],
-            source_backing_buckets: [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT],
+            source_backing_buckets,
             insurance_credit_reservations: [InsuranceCreditReservationV16::EMPTY; V16_DOMAIN_COUNT],
             materialized_portfolio_count: 0,
             stale_certificate_count: 0,
@@ -4096,7 +4618,13 @@ impl MarketGroupV16 {
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
+        let long_domain = self.insurance_domain_index(asset_index, SideV16::Long)?;
+        let short_domain = self.insurance_domain_index(asset_index, SideV16::Short)?;
         self.assets[asset_index] = asset;
+        self.source_backing_buckets[long_domain] =
+            BackingBucketV16::empty_for_market(asset.market_id);
+        self.source_backing_buckets[short_domain] =
+            BackingBucketV16::empty_for_market(asset.market_id);
         self.next_market_id = self
             .next_market_id
             .checked_add(1)
@@ -7287,12 +7815,13 @@ impl MarketGroupV16 {
     fn validate_backing_bucket_static(bucket: BackingBucketV16) -> V16Result<()> {
         match bucket.status {
             BackingBucketStatusV16::Empty => {
-                if bucket != BackingBucketV16::EMPTY {
+                if !bucket.is_empty_amount_shape() {
                     return Err(V16Error::InvalidConfig);
                 }
             }
             BackingBucketStatusV16::Fresh => {
-                if bucket.expiry_slot == 0
+                if bucket.market_id == 0
+                    || bucket.expiry_slot == 0
                     || bucket
                         .fresh_unliened_backing_num
                         .checked_add(bucket.valid_liened_backing_num)
@@ -7303,7 +7832,8 @@ impl MarketGroupV16 {
                 }
             }
             BackingBucketStatusV16::Expired => {
-                if bucket.fresh_unliened_backing_num != 0
+                if bucket.market_id == 0
+                    || bucket.fresh_unliened_backing_num != 0
                     || bucket.valid_liened_backing_num != 0
                     || bucket.impaired_liened_backing_num != 0
                 {
@@ -7311,7 +7841,8 @@ impl MarketGroupV16 {
                 }
             }
             BackingBucketStatusV16::Impaired => {
-                if bucket.fresh_unliened_backing_num != 0
+                if bucket.market_id == 0
+                    || bucket.fresh_unliened_backing_num != 0
                     || bucket.valid_liened_backing_num != 0
                     || bucket.impaired_liened_backing_num == 0
                 {
@@ -7342,6 +7873,11 @@ impl MarketGroupV16 {
         Self::validate_source_credit_state_static(source)?;
         Self::validate_backing_bucket_static(bucket)?;
         Self::validate_insurance_reservation_static(reservation)?;
+        let (asset_index, _) = self.source_domain_asset_side(domain)?;
+        let expected_market_id = self.assets[asset_index].market_id;
+        if expected_market_id == 0 || bucket.market_id != expected_market_id {
+            return Err(V16Error::InvalidConfig);
+        }
         let fresh_reserved = bucket
             .fresh_unliened_backing_num
             .checked_add(bucket.valid_liened_backing_num)
@@ -7487,6 +8023,8 @@ impl MarketGroupV16 {
         let asset = self.assets[asset_index];
         let long_domain = self.insurance_domain_index(asset_index, SideV16::Long)?;
         let short_domain = self.insurance_domain_index(asset_index, SideV16::Short)?;
+        let long_bucket = self.source_backing_buckets[long_domain];
+        let short_bucket = self.source_backing_buckets[short_domain];
         if self.pending_domain_loss_barriers[long_domain] != 0
             || self.pending_domain_loss_barriers[short_domain] != 0
             || asset.mode_long != SideModeV16::Normal
@@ -7525,8 +8063,10 @@ impl MarketGroupV16 {
             || self.insurance_domain_spent[short_domain] != 0
             || self.source_credit[long_domain] != SourceCreditStateV16::EMPTY
             || self.source_credit[short_domain] != SourceCreditStateV16::EMPTY
-            || self.source_backing_buckets[long_domain] != BackingBucketV16::EMPTY
-            || self.source_backing_buckets[short_domain] != BackingBucketV16::EMPTY
+            || !long_bucket.is_empty_amount_shape()
+            || !short_bucket.is_empty_amount_shape()
+            || long_bucket.market_id != asset.market_id
+            || short_bucket.market_id != asset.market_id
             || self.insurance_credit_reservations[long_domain]
                 != InsuranceCreditReservationV16::EMPTY
             || self.insurance_credit_reservations[short_domain]
