@@ -2591,13 +2591,17 @@ impl Default for MarketGroupV16HeaderAccount {
 }
 
 impl MarketGroupV16HeaderAccount {
+    pub fn dynamic_asset_slot_stride(wrapper_ext_len: usize) -> V16Result<usize> {
+        core::mem::size_of::<EngineAssetSlotV16Account>()
+            .checked_add(wrapper_ext_len)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     pub fn dynamic_market_group_account_len(
         asset_slot_capacity: usize,
         wrapper_ext_len: usize,
     ) -> V16Result<usize> {
-        let slot_len = core::mem::size_of::<EngineAssetSlotV16Account>()
-            .checked_add(wrapper_ext_len)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let slot_len = Self::dynamic_asset_slot_stride(wrapper_ext_len)?;
         core::mem::size_of::<Self>()
             .checked_add(
                 asset_slot_capacity
@@ -2605,6 +2609,49 @@ impl MarketGroupV16HeaderAccount {
                     .ok_or(V16Error::ArithmeticOverflow)?,
             )
             .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    pub fn dynamic_asset_slot_offset(
+        asset_index: usize,
+        wrapper_ext_len: usize,
+    ) -> V16Result<usize> {
+        let slot_len = Self::dynamic_asset_slot_stride(wrapper_ext_len)?;
+        core::mem::size_of::<Self>()
+            .checked_add(
+                asset_index
+                    .checked_mul(slot_len)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            )
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    pub fn dynamic_asset_slot_capacity_from_account_len(
+        account_len: usize,
+        wrapper_ext_len: usize,
+    ) -> V16Result<usize> {
+        let header_len = core::mem::size_of::<Self>();
+        if account_len < header_len {
+            return Err(V16Error::InvalidConfig);
+        }
+        let slot_len = Self::dynamic_asset_slot_stride(wrapper_ext_len)?;
+        let trailing_len = account_len - header_len;
+        if slot_len == 0 || trailing_len % slot_len != 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(trailing_len / slot_len)
+    }
+
+    pub fn validate_dynamic_market_group_account_len(
+        account_len: usize,
+        asset_slot_capacity: usize,
+        wrapper_ext_len: usize,
+    ) -> V16Result<()> {
+        let expected_len =
+            Self::dynamic_market_group_account_len(asset_slot_capacity, wrapper_ext_len)?;
+        if account_len != expected_len {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(())
     }
 
     pub fn new_dynamic(

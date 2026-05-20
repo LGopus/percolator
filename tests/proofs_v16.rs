@@ -11,7 +11,7 @@ use percolator::v16::{
     ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
     SideV16, SourceCreditLienAggregateProofV16, SourceCreditStateV16, StockReconciliationProofV16,
     TradeRequestV16, V16ActiveBitmap, V16Config, V16Error, V16PodI128, V16PodU64, V16_DOMAIN_COUNT,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    V16_MAX_MARKET_SLOTS_N, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_OI_SIDE_Q, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q,
@@ -4350,6 +4350,90 @@ fn proof_v16_dynamic_header_growth_counter_overflows_fail_before_metadata_mutati
     );
     assert_eq!(header.asset_set_epoch.get(), before_asset_set_epoch);
     assert_eq!(header.risk_epoch.get(), before_risk_epoch);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_dynamic_realloc_layout_capacity_not_fixed_by_proof_window() {
+    let wrapper_ext_len_raw: u8 = kani::any();
+    let wrapper_ext_len = (wrapper_ext_len_raw as usize) % 32;
+    let capacity = V16_MAX_MARKET_SLOTS_N + 5;
+    let slot_len = MarketGroupV16HeaderAccount::dynamic_asset_slot_stride(wrapper_ext_len).unwrap();
+    let account_len =
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len(capacity, wrapper_ext_len)
+            .unwrap();
+    let last_offset =
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_offset(capacity - 1, wrapper_ext_len)
+            .unwrap();
+
+    kani::cover!(
+        capacity > V16_MAX_MARKET_SLOTS_N,
+        "v16 dynamic realloc proof exercises capacity beyond fixed proof window"
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len(
+            account_len,
+            wrapper_ext_len,
+        ),
+        Ok(capacity)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::validate_dynamic_market_group_account_len(
+            account_len,
+            capacity,
+            wrapper_ext_len,
+        ),
+        Ok(())
+    );
+    assert_eq!(last_offset + slot_len, account_len);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_dynamic_realloc_layout_rejects_bad_lengths() {
+    let case: u8 = kani::any();
+    kani::assume(case < 3);
+    let wrapper_ext_len_raw: u8 = kani::any();
+    let wrapper_ext_len = (wrapper_ext_len_raw as usize) % 32;
+    let capacity = V16_MAX_MARKET_SLOTS_N + 5;
+    let account_len =
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len(capacity, wrapper_ext_len)
+            .unwrap();
+    let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
+    let bad_len = match case {
+        0 => header_len - 1,
+        1 => account_len - 1,
+        _ => account_len,
+    };
+    let result = if case == 2 {
+        MarketGroupV16HeaderAccount::validate_dynamic_market_group_account_len(
+            bad_len,
+            capacity + 1,
+            wrapper_ext_len,
+        )
+    } else {
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len(
+            bad_len,
+            wrapper_ext_len,
+        )
+        .map(|_| ())
+    };
+
+    kani::cover!(
+        case == 0,
+        "v16 dynamic layout rejects shorter-than-header account"
+    );
+    kani::cover!(
+        case == 1,
+        "v16 dynamic layout rejects trailing partial slot"
+    );
+    kani::cover!(
+        case == 2,
+        "v16 dynamic layout rejects wrong expected capacity"
+    );
+    assert_eq!(result, Err(V16Error::InvalidConfig));
 }
 
 #[kani::proof]

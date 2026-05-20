@@ -3310,6 +3310,76 @@ fn v16_dynamic_header_capacity_is_wrapper_supplied_not_fixed_runtime_window() {
 }
 
 #[test]
+fn v16_dynamic_realloc_layout_is_capacity_driven_not_fixed_runtime_window() {
+    let capacity = V16_MAX_MARKET_SLOTS_N * 4 + 7;
+    let wrapper_ext_len = 24usize;
+    let slot_len = MarketGroupV16HeaderAccount::dynamic_asset_slot_stride(wrapper_ext_len).unwrap();
+    let account_len =
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len(capacity, wrapper_ext_len)
+            .unwrap();
+    let last_offset =
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_offset(capacity - 1, wrapper_ext_len)
+            .unwrap();
+
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len(
+            account_len,
+            wrapper_ext_len
+        ),
+        Ok(capacity)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::validate_dynamic_market_group_account_len(
+            account_len,
+            capacity,
+            wrapper_ext_len
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        last_offset + slot_len,
+        account_len,
+        "last growable slot must end exactly at the reallocated account length"
+    );
+    assert!(
+        capacity > V16_MAX_MARKET_SLOTS_N,
+        "test must exercise capacity beyond the fixed proof aggregate"
+    );
+}
+
+#[test]
+fn v16_dynamic_realloc_layout_rejects_truncated_or_misaligned_lengths() {
+    let capacity = V16_MAX_MARKET_SLOTS_N + 3;
+    let wrapper_ext_len = 7usize;
+    let account_len =
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len(capacity, wrapper_ext_len)
+            .unwrap();
+
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len(
+            core::mem::size_of::<MarketGroupV16HeaderAccount>() - 1,
+            wrapper_ext_len
+        ),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len(
+            account_len - 1,
+            wrapper_ext_len
+        ),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::validate_dynamic_market_group_account_len(
+            account_len,
+            capacity + 1,
+            wrapper_ext_len
+        ),
+        Err(V16Error::InvalidConfig)
+    );
+}
+
+#[test]
 fn v16_fixed_runtime_aggregate_rejects_capacity_above_internal_window() {
     let config =
         V16Config::public_user_fund_with_market_slots(4, V16_MAX_MARKET_SLOTS_N as u32 + 1, 0, 10);
