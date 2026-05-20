@@ -2672,20 +2672,20 @@ impl MarketGroupV16HeaderAccount {
         }
         config.max_market_slots = new_max_market_slots;
         config.validate_public_user_fund_shape()?;
+        let next_asset_set_epoch = self
+            .asset_set_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_risk_epoch = self
+            .risk_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
         self.asset_slot_capacity = V16PodU32::new(new_asset_slot_capacity);
         self.config = V16ConfigAccount::from_runtime(&config);
-        self.asset_set_epoch = V16PodU64::new(
-            self.asset_set_epoch
-                .get()
-                .checked_add(1)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
-        self.risk_epoch = V16PodU64::new(
-            self.risk_epoch
-                .get()
-                .checked_add(1)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        self.asset_set_epoch = V16PodU64::new(next_asset_set_epoch);
+        self.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
 
@@ -2886,6 +2886,22 @@ impl MarketGroupV16HeaderAccount {
         if market_id == 0 {
             return Err(V16Error::InvalidConfig);
         }
+        let next_market_id = market_id.checked_add(1).ok_or(V16Error::CounterOverflow)?;
+        let next_activation_count = self
+            .asset_activation_count
+            .get()
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_asset_set_epoch = self
+            .asset_set_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_risk_epoch = self
+            .risk_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
         let mut asset = AssetStateV16::default();
         asset.market_id = market_id;
         asset.lifecycle = AssetLifecycleV16::Active;
@@ -2920,28 +2936,12 @@ impl MarketGroupV16HeaderAccount {
                 &InsuranceCreditReservationV16::EMPTY,
             ),
         };
-        self.next_market_id =
-            V16PodU64::new(market_id.checked_add(1).ok_or(V16Error::CounterOverflow)?);
+        self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
-        self.asset_activation_count = V16PodU64::new(
-            self.asset_activation_count
-                .get()
-                .checked_add(1)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        self.asset_activation_count = V16PodU64::new(next_activation_count);
         self.last_asset_activation_slot = V16PodU64::new(now_slot);
-        self.asset_set_epoch = V16PodU64::new(
-            self.asset_set_epoch
-                .get()
-                .checked_add(1)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
-        self.risk_epoch = V16PodU64::new(
-            self.risk_epoch
-                .get()
-                .checked_add(1)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        self.asset_set_epoch = V16PodU64::new(next_asset_set_epoch);
+        self.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
 }
@@ -4570,16 +4570,7 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        if self.mode != MarketModeV16::Live {
-            return Err(V16Error::LockActive);
-        }
-        let nonflat_before = !active_bitmap_is_empty(account.active_bitmap);
-        if nonflat_before && self.loss_stale_active {
-            return Err(V16Error::LockActive);
-        }
-        if nonflat_before && self.account_has_target_effective_lag(account)? {
-            return Err(V16Error::LockActive);
-        }
+        self.validate_withdraw_global_locks(account)?;
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
         let locked = self.h_lock_lane(Some(account), false)? == HLockLaneV16::HMax;
@@ -4606,6 +4597,28 @@ impl MarketGroupV16 {
         }
         self.withdraw_core_not_atomic(account, amount)?;
         self.assert_public_invariants()
+    }
+
+    fn validate_withdraw_global_locks(&self, account: &PortfolioAccountV16) -> V16Result<()> {
+        if self.mode != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        let nonflat_before = !active_bitmap_is_empty(account.active_bitmap);
+        if nonflat_before && self.loss_stale_active {
+            return Err(V16Error::LockActive);
+        }
+        if nonflat_before && self.account_has_target_effective_lag(account)? {
+            return Err(V16Error::LockActive);
+        }
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_validate_withdraw_global_locks(
+        &self,
+        account: &PortfolioAccountV16,
+    ) -> V16Result<()> {
+        self.validate_withdraw_global_locks(account)
     }
 
     fn withdraw_core_not_atomic(
@@ -4928,8 +4941,10 @@ impl MarketGroupV16 {
         }
         match self.assets[asset_index].lifecycle {
             AssetLifecycleV16::Active => {
+                let (next_asset_set_epoch, next_risk_epoch) =
+                    self.checked_asset_set_epoch_bump()?;
                 self.assets[asset_index].lifecycle = AssetLifecycleV16::DrainOnly;
-                self.bump_asset_set_epoch()?;
+                self.commit_asset_set_epoch_bump(next_asset_set_epoch, next_risk_epoch);
                 self.assert_public_invariants()
             }
             AssetLifecycleV16::DrainOnly => Ok(()),
@@ -4951,10 +4966,12 @@ impl MarketGroupV16 {
             | AssetLifecycleV16::DrainOnly
             | AssetLifecycleV16::Recovery => {
                 self.require_empty_asset_lifecycle_state(asset_index)?;
+                let (next_asset_set_epoch, next_risk_epoch) =
+                    self.checked_asset_set_epoch_bump()?;
                 self.assets[asset_index].lifecycle = AssetLifecycleV16::Retired;
                 self.assets[asset_index].retired_slot = now_slot;
                 self.current_slot = now_slot;
-                self.bump_asset_set_epoch()?;
+                self.commit_asset_set_epoch_bump(next_asset_set_epoch, next_risk_epoch);
                 self.assert_public_invariants()
             }
             AssetLifecycleV16::Retired => {
@@ -5017,22 +5034,25 @@ impl MarketGroupV16 {
         asset.slot_last = now_slot;
         let long_domain = self.insurance_domain_index(asset_index, SideV16::Long)?;
         let short_domain = self.insurance_domain_index(asset_index, SideV16::Short)?;
+        let next_market_id = self
+            .next_market_id
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_activation_count = self
+            .asset_activation_count
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        let (next_asset_set_epoch, next_risk_epoch) = self.checked_asset_set_epoch_bump()?;
         self.assets[asset_index] = asset;
         self.source_backing_buckets[long_domain] =
             BackingBucketV16::empty_for_market(asset.market_id);
         self.source_backing_buckets[short_domain] =
             BackingBucketV16::empty_for_market(asset.market_id);
-        self.next_market_id = self
-            .next_market_id
-            .checked_add(1)
-            .ok_or(V16Error::CounterOverflow)?;
+        self.next_market_id = next_market_id;
         self.current_slot = now_slot;
-        self.asset_activation_count = self
-            .asset_activation_count
-            .checked_add(1)
-            .ok_or(V16Error::CounterOverflow)?;
+        self.asset_activation_count = next_activation_count;
         self.last_asset_activation_slot = now_slot;
-        self.bump_asset_set_epoch()?;
+        self.commit_asset_set_epoch_bump(next_asset_set_epoch, next_risk_epoch);
         self.assert_public_invariants()
     }
 
@@ -5341,11 +5361,7 @@ impl MarketGroupV16 {
             }
             let asset_index = leg.asset_index as usize;
             self.settle_leg_kf_effects(account, asset_index)?;
-            let leg_after = account.legs[slot];
-            if self.b_target_for_leg(asset_index, leg_after)? > leg_after.b_snap {
-                self.mark_leg_b_stale(account, asset_index)?;
-                return Err(V16Error::BStale);
-            }
+            self.reject_if_leg_b_target_advanced(account, slot)?;
         }
         if account.stale_state {
             self.clear_account_stale(account)?;
@@ -5406,6 +5422,35 @@ impl MarketGroupV16 {
         account.health_cert = cert;
         self.validate_account_shape(account)?;
         Ok(cert)
+    }
+
+    fn reject_if_leg_b_target_advanced(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(V16Error::InvalidLeg);
+        }
+        let leg = account.legs[leg_slot];
+        if !leg.active {
+            return Ok(());
+        }
+        let asset_index = leg.asset_index as usize;
+        if self.b_target_for_leg(asset_index, leg)? > leg.b_snap {
+            self.mark_leg_b_stale(account, asset_index)?;
+            return Err(V16Error::BStale);
+        }
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_reject_if_leg_b_target_advanced(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        self.reject_if_leg_b_target_advanced(account, leg_slot)
     }
 
     pub fn ensure_favorable_action_allowed(&self, account: &PortfolioAccountV16) -> V16Result<()> {
@@ -7477,16 +7522,11 @@ impl MarketGroupV16 {
 
     pub fn recompute_source_credit_rate_not_atomic(&mut self, domain: usize) -> V16Result<u128> {
         self.validate_source_domain_index(domain)?;
-        let rate = Self::expected_source_credit_rate_num_for_state(self.source_credit[domain])?;
-        self.source_credit[domain].credit_rate_num = rate;
-        self.source_credit[domain].credit_epoch = self.source_credit[domain]
-            .credit_epoch
-            .checked_add(1)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.risk_epoch = self
-            .risk_epoch
-            .checked_add(1)
-            .ok_or(V16Error::CounterOverflow)?;
+        let (source, next_risk_epoch) =
+            self.prepared_source_credit_domain_recompute(self.source_credit[domain])?;
+        let rate = source.credit_rate_num;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
         self.assert_public_invariants()?;
         Ok(rate)
     }
@@ -7501,15 +7541,22 @@ impl MarketGroupV16 {
         if exact_claim_num > claim_bound_num {
             return Err(V16Error::InvalidConfig);
         }
-        self.source_credit[domain].positive_claim_bound_num = self.source_credit[domain]
-            .positive_claim_bound_num
-            .checked_add(claim_bound_num)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].exact_positive_claim_num = self.source_credit[domain]
-            .exact_positive_claim_num
-            .checked_add(exact_claim_num)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        let source = Self::prepare_source_positive_claim_bound_delta(
+            self.source_credit[domain],
+            claim_bound_num,
+            exact_claim_num,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.source_backing_buckets[domain],
+            self.insurance_credit_reservations[domain],
+        )?
+        .validate()?;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     pub fn add_account_source_positive_pnl_not_atomic(
@@ -7649,23 +7696,24 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let bucket = &mut self.source_backing_buckets[domain];
-        if bucket.status != BackingBucketStatusV16::Fresh
-            || bucket.expiry_slot <= self.current_slot
-            || bucket.fresh_unliened_backing_num < amount
-        {
-            return Err(V16Error::LockActive);
-        }
-        bucket.fresh_unliened_backing_num -= amount;
-        bucket.valid_liened_backing_num = bucket
-            .valid_liened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].valid_liened_backing_num = self.source_credit[domain]
-            .valid_liened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        let (bucket, source) = Self::prepare_counterparty_lien_create_delta(
+            self.source_backing_buckets[domain],
+            self.source_credit[domain],
+            self.current_slot,
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_credit_reservations[domain],
+        )?
+        .validate()?;
+        self.source_backing_buckets[domain] = bucket;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     pub fn release_source_credit_lien_from_counterparty_not_atomic(
@@ -7677,21 +7725,24 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let bucket = &mut self.source_backing_buckets[domain];
-        if bucket.status != BackingBucketStatusV16::Fresh
-            || bucket.expiry_slot <= self.current_slot
-            || bucket.valid_liened_backing_num < amount
-            || self.source_credit[domain].valid_liened_backing_num < amount
-        {
-            return Err(V16Error::CounterUnderflow);
-        }
-        bucket.valid_liened_backing_num -= amount;
-        bucket.fresh_unliened_backing_num = bucket
-            .fresh_unliened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].valid_liened_backing_num -= amount;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        let (bucket, source) = Self::prepare_counterparty_lien_release_delta(
+            self.source_backing_buckets[domain],
+            self.source_credit[domain],
+            self.current_slot,
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_credit_reservations[domain],
+        )?
+        .validate()?;
+        self.source_backing_buckets[domain] = bucket;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     pub fn consume_source_credit_lien_from_counterparty_not_atomic(
@@ -7712,33 +7763,23 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let bucket = &mut self.source_backing_buckets[domain];
-        if bucket.valid_liened_backing_num < amount
-            || self.source_credit[domain].valid_liened_backing_num < amount
-            || self.source_credit[domain].fresh_reserved_backing_num < amount
-        {
-            return Err(V16Error::CounterUnderflow);
-        }
-        bucket.valid_liened_backing_num -= amount;
-        bucket.consumed_liened_backing_num = bucket
-            .consumed_liened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        if bucket.fresh_unliened_backing_num == 0
-            && bucket.valid_liened_backing_num == 0
-            && bucket.impaired_liened_backing_num == 0
-        {
-            bucket.status = BackingBucketStatusV16::Expired;
-        }
-        self.source_credit[domain].valid_liened_backing_num -= amount;
-        self.source_credit[domain].fresh_reserved_backing_num -= amount;
-        self.source_credit[domain].spent_backing_num = self.source_credit[domain]
-            .spent_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.recompute_source_credit_domain_after_mutation(domain)?;
-        self.reservation_encumbrance_proof_for_domain(domain)?
-            .validate()
+        let (bucket, source) = Self::prepare_counterparty_lien_consume_delta(
+            self.source_backing_buckets[domain],
+            self.source_credit[domain],
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_credit_reservations[domain],
+        )?
+        .validate()?;
+        self.source_backing_buckets[domain] = bucket;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        Ok(())
     }
 
     pub fn impair_source_credit_lien_from_counterparty_not_atomic(
@@ -7759,30 +7800,155 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let bucket = &mut self.source_backing_buckets[domain];
-        if bucket.valid_liened_backing_num < amount
-            || self.source_credit[domain].valid_liened_backing_num < amount
-            || self.source_credit[domain].fresh_reserved_backing_num < amount
+        let (bucket, source) = Self::prepare_counterparty_lien_impair_delta(
+            self.source_backing_buckets[domain],
+            self.source_credit[domain],
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_credit_reservations[domain],
+        )?
+        .validate()?;
+        self.source_backing_buckets[domain] = bucket;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        Ok(())
+    }
+
+    fn prepare_counterparty_lien_create_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        current_slot: u64,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= current_slot
+            || bucket.fresh_unliened_backing_num < amount
+        {
+            return Err(V16Error::LockActive);
+        }
+        let next_bucket_fresh = bucket.fresh_unliened_backing_num - amount;
+        let next_bucket_valid = bucket
+            .valid_liened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_source_valid = source
+            .valid_liened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.fresh_unliened_backing_num = next_bucket_fresh;
+        bucket.valid_liened_backing_num = next_bucket_valid;
+        source.valid_liened_backing_num = next_source_valid;
+        Ok((bucket, source))
+    }
+
+    fn prepare_counterparty_lien_release_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        current_slot: u64,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= current_slot
+            || bucket.valid_liened_backing_num < amount
+            || source.valid_liened_backing_num < amount
         {
             return Err(V16Error::CounterUnderflow);
         }
-        bucket.valid_liened_backing_num -= amount;
-        bucket.impaired_liened_backing_num = bucket
+        let next_bucket_valid = bucket.valid_liened_backing_num - amount;
+        let next_bucket_fresh = bucket
+            .fresh_unliened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.valid_liened_backing_num = next_bucket_valid;
+        bucket.fresh_unliened_backing_num = next_bucket_fresh;
+        source.valid_liened_backing_num -= amount;
+        Ok((bucket, source))
+    }
+
+    fn prepare_counterparty_lien_consume_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        if bucket.valid_liened_backing_num < amount
+            || source.valid_liened_backing_num < amount
+            || source.fresh_reserved_backing_num < amount
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let next_bucket_valid = bucket.valid_liened_backing_num - amount;
+        let next_bucket_consumed = bucket
+            .consumed_liened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_source_valid = source.valid_liened_backing_num - amount;
+        let next_source_fresh_reserved = source.fresh_reserved_backing_num - amount;
+        let next_source_spent = source
+            .spent_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.valid_liened_backing_num = next_bucket_valid;
+        bucket.consumed_liened_backing_num = next_bucket_consumed;
+        if bucket.fresh_unliened_backing_num == 0
+            && bucket.valid_liened_backing_num == 0
+            && bucket.impaired_liened_backing_num == 0
+        {
+            bucket.status = BackingBucketStatusV16::Expired;
+        }
+        source.valid_liened_backing_num = next_source_valid;
+        source.fresh_reserved_backing_num = next_source_fresh_reserved;
+        source.spent_backing_num = next_source_spent;
+        Ok((bucket, source))
+    }
+
+    fn prepare_counterparty_lien_impair_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        if bucket.valid_liened_backing_num < amount
+            || source.valid_liened_backing_num < amount
+            || source.fresh_reserved_backing_num < amount
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let next_bucket_valid = bucket.valid_liened_backing_num - amount;
+        let next_bucket_impaired = bucket
             .impaired_liened_backing_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
+        let next_source_valid = source.valid_liened_backing_num - amount;
+        let next_source_fresh_reserved = source.fresh_reserved_backing_num - amount;
+        let next_source_impaired = source
+            .impaired_liened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.valid_liened_backing_num = next_bucket_valid;
+        bucket.impaired_liened_backing_num = next_bucket_impaired;
         if bucket.valid_liened_backing_num == 0 && bucket.fresh_unliened_backing_num == 0 {
             bucket.status = BackingBucketStatusV16::Impaired;
         }
-        self.source_credit[domain].valid_liened_backing_num -= amount;
-        self.source_credit[domain].fresh_reserved_backing_num -= amount;
-        self.source_credit[domain].impaired_liened_backing_num = self.source_credit[domain]
-            .impaired_liened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.recompute_source_credit_domain_after_mutation(domain)?;
-        self.reservation_encumbrance_proof_for_domain(domain)?
-            .validate()
+        source.valid_liened_backing_num = next_source_valid;
+        source.fresh_reserved_backing_num = next_source_fresh_reserved;
+        source.impaired_liened_backing_num = next_source_impaired;
+        Ok((bucket, source))
     }
 
     #[cfg(kani)]
@@ -7801,6 +7967,44 @@ impl MarketGroupV16 {
         amount: u128,
     ) -> V16Result<()> {
         self.impair_source_credit_lien_from_counterparty_core_not_atomic(domain, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_lien_consume_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        Self::prepare_counterparty_lien_consume_delta(bucket, source, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_lien_create_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        current_slot: u64,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        Self::prepare_counterparty_lien_create_delta(bucket, source, current_slot, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_lien_release_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        current_slot: u64,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        Self::prepare_counterparty_lien_release_delta(bucket, source, current_slot, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_lien_impair_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        Self::prepare_counterparty_lien_impair_delta(bucket, source, amount)
     }
 
     pub fn expire_source_backing_bucket_not_atomic(
@@ -7879,14 +8083,26 @@ impl MarketGroupV16 {
         {
             return Err(V16Error::LockActive);
         }
-        self.insurance_credit_reservations[domain].insurance_credit_reserved_num = new_reserved;
-        self.insurance_credit_reservations[domain].source_credit_epoch =
-            self.source_credit[domain].credit_epoch;
-        self.source_credit[domain].insurance_credit_reserved_num = self.source_credit[domain]
+        let mut reservation = self.insurance_credit_reservations[domain];
+        let mut source = self.source_credit[domain];
+        reservation.insurance_credit_reserved_num = new_reserved;
+        reservation.source_credit_epoch = source.credit_epoch;
+        source.insurance_credit_reserved_num = source
             .insurance_credit_reserved_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.source_backing_buckets[domain],
+            reservation,
+        )?
+        .validate()?;
+        self.insurance_credit_reservations[domain] = reservation;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     pub fn create_source_credit_lien_from_insurance_not_atomic(
@@ -7898,27 +8114,23 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let reservation = &mut self.insurance_credit_reservations[domain];
-        let encumbered = reservation
-            .valid_liened_insurance_num
-            .checked_add(reservation.impaired_liened_insurance_num)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let free_reserved = reservation
-            .insurance_credit_reserved_num
-            .checked_sub(encumbered)
-            .ok_or(V16Error::CounterUnderflow)?;
-        if free_reserved < amount {
-            return Err(V16Error::LockActive);
-        }
-        reservation.valid_liened_insurance_num = reservation
-            .valid_liened_insurance_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].valid_liened_insurance_num = self.source_credit[domain]
-            .valid_liened_insurance_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        let (reservation, source) = Self::prepare_insurance_lien_create_delta(
+            self.insurance_credit_reservations[domain],
+            self.source_credit[domain],
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.source_backing_buckets[domain],
+            reservation,
+        )?
+        .validate()?;
+        self.insurance_credit_reservations[domain] = reservation;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     fn source_claim_unliened_num(account: &PortfolioAccountV16, domain: usize) -> V16Result<u128> {
@@ -8277,15 +8489,23 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let reservation = &mut self.insurance_credit_reservations[domain];
-        if reservation.valid_liened_insurance_num < amount
-            || self.source_credit[domain].valid_liened_insurance_num < amount
-        {
-            return Err(V16Error::CounterUnderflow);
-        }
-        reservation.valid_liened_insurance_num -= amount;
-        self.source_credit[domain].valid_liened_insurance_num -= amount;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        let (reservation, source) = Self::prepare_insurance_lien_release_delta(
+            self.insurance_credit_reservations[domain],
+            self.source_credit[domain],
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.source_backing_buckets[domain],
+            reservation,
+        )?
+        .validate()?;
+        self.insurance_credit_reservations[domain] = reservation;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     pub fn consume_source_credit_lien_from_insurance_not_atomic(
@@ -8297,35 +8517,35 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let spend_atoms = Self::amount_from_bound_num(amount)?;
-        let reservation = &mut self.insurance_credit_reservations[domain];
-        if reservation.valid_liened_insurance_num < amount
-            || reservation.insurance_credit_reserved_num < amount
-            || self.source_credit[domain].valid_liened_insurance_num < amount
-            || self.source_credit[domain].insurance_credit_reserved_num < amount
-            || self.insurance < spend_atoms
-        {
-            return Err(V16Error::CounterUnderflow);
-        }
+        let (reservation, source, next_domain_spent, next_insurance) =
+            Self::prepare_insurance_lien_consume_delta(
+                self.insurance_credit_reservations[domain],
+                self.source_credit[domain],
+                self.insurance_domain_spent[domain],
+                self.insurance,
+                amount,
+            )?;
+        let spend_atoms = self.insurance - next_insurance;
         let vault_before = self.vault;
-        reservation.valid_liened_insurance_num -= amount;
-        reservation.insurance_credit_reserved_num -= amount;
-        reservation.consumed_insurance_num = reservation
-            .consumed_insurance_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].valid_liened_insurance_num -= amount;
-        self.source_credit[domain].insurance_credit_reserved_num -= amount;
-        self.insurance -= spend_atoms;
-        self.insurance_domain_spent[domain] = self.insurance_domain_spent[domain]
-            .checked_add(spend_atoms)
-            .ok_or(V16Error::CounterOverflow)?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
         TokenValueFlowProofV16::validate_insurance_to_close_insurance_spent(
             spend_atoms,
             vault_before,
             self.vault,
         )?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.source_backing_buckets[domain],
+            reservation,
+        )?
+        .validate()?;
+        self.insurance_credit_reservations[domain] = reservation;
+        self.source_credit[domain] = source;
+        self.insurance = next_insurance;
+        self.insurance_domain_spent[domain] = next_domain_spent;
+        self.risk_epoch = next_risk_epoch;
+        self.assert_public_invariants()
     }
 
     pub fn impair_source_credit_lien_from_insurance_not_atomic(
@@ -8346,25 +8566,190 @@ impl MarketGroupV16 {
         if amount == 0 {
             return Ok(());
         }
-        let reservation = &mut self.insurance_credit_reservations[domain];
+        let (reservation, source) = Self::prepare_insurance_lien_impair_delta(
+            self.insurance_credit_reservations[domain],
+            self.source_credit[domain],
+            amount,
+        )?;
+        let (source, next_risk_epoch) = self.prepared_source_credit_domain_recompute(source)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.source_backing_buckets[domain],
+            reservation,
+        )?
+        .validate()?;
+        self.insurance_credit_reservations[domain] = reservation;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        Ok(())
+    }
+
+    fn prepare_insurance_lien_consume_delta(
+        mut reservation: InsuranceCreditReservationV16,
+        mut source: SourceCreditStateV16,
+        domain_spent: u128,
+        insurance: u128,
+        amount: u128,
+    ) -> V16Result<(
+        InsuranceCreditReservationV16,
+        SourceCreditStateV16,
+        u128,
+        u128,
+    )> {
+        if amount == 0 {
+            return Ok((reservation, source, domain_spent, insurance));
+        }
+        let spend_atoms = Self::amount_from_bound_num(amount)?;
         if reservation.valid_liened_insurance_num < amount
-            || self.source_credit[domain].valid_liened_insurance_num < amount
+            || reservation.insurance_credit_reserved_num < amount
+            || source.valid_liened_insurance_num < amount
+            || source.insurance_credit_reserved_num < amount
+            || insurance < spend_atoms
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let next_domain_spent = domain_spent
+            .checked_add(spend_atoms)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_insurance = insurance - spend_atoms;
+        let next_consumed = reservation
+            .consumed_insurance_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        reservation.valid_liened_insurance_num -= amount;
+        reservation.insurance_credit_reserved_num -= amount;
+        reservation.consumed_insurance_num = next_consumed;
+        source.valid_liened_insurance_num -= amount;
+        source.insurance_credit_reserved_num -= amount;
+        Ok((reservation, source, next_domain_spent, next_insurance))
+    }
+
+    fn prepare_insurance_lien_create_delta(
+        mut reservation: InsuranceCreditReservationV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((reservation, source));
+        }
+        let encumbered = reservation
+            .valid_liened_insurance_num
+            .checked_add(reservation.impaired_liened_insurance_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let free_reserved = reservation
+            .insurance_credit_reserved_num
+            .checked_sub(encumbered)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if free_reserved < amount {
+            return Err(V16Error::LockActive);
+        }
+        let next_reservation_valid = reservation
+            .valid_liened_insurance_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let next_source_valid = source
+            .valid_liened_insurance_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        reservation.valid_liened_insurance_num = next_reservation_valid;
+        source.valid_liened_insurance_num = next_source_valid;
+        Ok((reservation, source))
+    }
+
+    fn prepare_insurance_lien_release_delta(
+        mut reservation: InsuranceCreditReservationV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((reservation, source));
+        }
+        if reservation.valid_liened_insurance_num < amount
+            || source.valid_liened_insurance_num < amount
         {
             return Err(V16Error::CounterUnderflow);
         }
         reservation.valid_liened_insurance_num -= amount;
-        reservation.impaired_liened_insurance_num = reservation
+        source.valid_liened_insurance_num -= amount;
+        Ok((reservation, source))
+    }
+
+    fn prepare_insurance_lien_impair_delta(
+        mut reservation: InsuranceCreditReservationV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((reservation, source));
+        }
+        if reservation.valid_liened_insurance_num < amount
+            || source.valid_liened_insurance_num < amount
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let next_reservation_impaired = reservation
             .impaired_liened_insurance_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].valid_liened_insurance_num -= amount;
-        self.source_credit[domain].impaired_liened_insurance_num = self.source_credit[domain]
+        let next_source_impaired = source
             .impaired_liened_insurance_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
-        self.recompute_source_credit_domain_after_mutation(domain)?;
-        self.reservation_encumbrance_proof_for_domain(domain)?
-            .validate()
+        reservation.valid_liened_insurance_num -= amount;
+        reservation.impaired_liened_insurance_num = next_reservation_impaired;
+        source.valid_liened_insurance_num -= amount;
+        source.impaired_liened_insurance_num = next_source_impaired;
+        Ok((reservation, source))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_insurance_lien_consume_delta(
+        reservation: InsuranceCreditReservationV16,
+        source: SourceCreditStateV16,
+        domain_spent: u128,
+        insurance: u128,
+        amount: u128,
+    ) -> V16Result<(
+        InsuranceCreditReservationV16,
+        SourceCreditStateV16,
+        u128,
+        u128,
+    )> {
+        Self::prepare_insurance_lien_consume_delta(
+            reservation,
+            source,
+            domain_spent,
+            insurance,
+            amount,
+        )
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_insurance_lien_create_delta(
+        reservation: InsuranceCreditReservationV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        Self::prepare_insurance_lien_create_delta(reservation, source, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_insurance_lien_release_delta(
+        reservation: InsuranceCreditReservationV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        Self::prepare_insurance_lien_release_delta(reservation, source, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_insurance_lien_impair_delta(
+        reservation: InsuranceCreditReservationV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        Self::prepare_insurance_lien_impair_delta(reservation, source, amount)
     }
 
     fn refresh_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
@@ -8375,17 +8760,77 @@ impl MarketGroupV16 {
     }
 
     fn recompute_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
-        let rate = Self::expected_source_credit_rate_num_for_state(self.source_credit[domain])?;
-        self.source_credit[domain].credit_rate_num = rate;
-        self.source_credit[domain].credit_epoch = self.source_credit[domain]
+        let (source, next_risk_epoch) =
+            self.prepared_source_credit_domain_recompute(self.source_credit[domain])?;
+        self.source_credit[domain] = source;
+        self.risk_epoch = next_risk_epoch;
+        Ok(())
+    }
+
+    fn prepared_source_credit_domain_recompute(
+        &self,
+        source: SourceCreditStateV16,
+    ) -> V16Result<(SourceCreditStateV16, u64)> {
+        Self::prepare_source_credit_domain_recompute_for_epoch(source, self.risk_epoch)
+    }
+
+    fn prepare_source_credit_domain_recompute_for_epoch(
+        mut source: SourceCreditStateV16,
+        risk_epoch: u64,
+    ) -> V16Result<(SourceCreditStateV16, u64)> {
+        source.credit_rate_num = Self::expected_source_credit_rate_num_for_state(source)?;
+        source.credit_epoch = source
             .credit_epoch
             .checked_add(1)
             .ok_or(V16Error::CounterOverflow)?;
-        self.risk_epoch = self
-            .risk_epoch
-            .checked_add(1)
+        let next_risk_epoch = risk_epoch.checked_add(1).ok_or(V16Error::CounterOverflow)?;
+        Ok((source, next_risk_epoch))
+    }
+
+    fn prepare_source_positive_claim_bound_delta(
+        mut source: SourceCreditStateV16,
+        claim_bound_num: u128,
+        exact_claim_num: u128,
+    ) -> V16Result<SourceCreditStateV16> {
+        if exact_claim_num > claim_bound_num {
+            return Err(V16Error::InvalidConfig);
+        }
+        let next_bound = source
+            .positive_claim_bound_num
+            .checked_add(claim_bound_num)
             .ok_or(V16Error::CounterOverflow)?;
-        Ok(())
+        let next_exact = source
+            .exact_positive_claim_num
+            .checked_add(exact_claim_num)
+            .ok_or(V16Error::CounterOverflow)?;
+        source.positive_claim_bound_num = next_bound;
+        source.exact_positive_claim_num = next_exact;
+        Ok(source)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepared_source_credit_domain_recompute(
+        &self,
+        source: SourceCreditStateV16,
+    ) -> V16Result<(SourceCreditStateV16, u64)> {
+        self.prepared_source_credit_domain_recompute(source)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_source_credit_domain_recompute_for_epoch(
+        source: SourceCreditStateV16,
+        risk_epoch: u64,
+    ) -> V16Result<(SourceCreditStateV16, u64)> {
+        Self::prepare_source_credit_domain_recompute_for_epoch(source, risk_epoch)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_source_positive_claim_bound_delta(
+        source: SourceCreditStateV16,
+        claim_bound_num: u128,
+        exact_claim_num: u128,
+    ) -> V16Result<SourceCreditStateV16> {
+        Self::prepare_source_positive_claim_bound_delta(source, claim_bound_num, exact_claim_num)
     }
 
     pub fn reservation_encumbrance_proof_for_domain(
@@ -8393,9 +8838,22 @@ impl MarketGroupV16 {
         domain: usize,
     ) -> V16Result<ReservationEncumbranceProofV16> {
         self.validate_source_domain_index(domain)?;
-        let source = self.source_credit[domain];
-        let bucket = self.source_backing_buckets[domain];
-        let reservation = self.insurance_credit_reservations[domain];
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            self.source_credit[domain],
+            self.source_backing_buckets[domain],
+            self.insurance_credit_reservations[domain],
+        )
+    }
+
+    fn reservation_encumbrance_proof_for_domain_parts(
+        &self,
+        domain: usize,
+        source: SourceCreditStateV16,
+        bucket: BackingBucketV16,
+        reservation: InsuranceCreditReservationV16,
+    ) -> V16Result<ReservationEncumbranceProofV16> {
+        self.validate_source_domain_index(domain)?;
         Ok(ReservationEncumbranceProofV16 {
             domain: domain as u16,
             exact_positive_claim_num: source.exact_positive_claim_num,
@@ -8414,6 +8872,17 @@ impl MarketGroupV16 {
             reservation_impaired_liened_insurance_num: reservation.impaired_liened_insurance_num,
             source_credit_rate_num: source.credit_rate_num,
         })
+    }
+
+    #[cfg(kani)]
+    pub fn kani_reservation_encumbrance_proof_for_domain_parts(
+        &self,
+        domain: usize,
+        source: SourceCreditStateV16,
+        bucket: BackingBucketV16,
+        reservation: InsuranceCreditReservationV16,
+    ) -> V16Result<ReservationEncumbranceProofV16> {
+        self.reservation_encumbrance_proof_for_domain_parts(domain, source, bucket, reservation)
     }
 
     fn validate_source_domain_index(&self, domain: usize) -> V16Result<()> {
@@ -8646,16 +9115,21 @@ impl MarketGroupV16 {
         Ok(())
     }
 
-    fn bump_asset_set_epoch(&mut self) -> V16Result<()> {
-        self.asset_set_epoch = self
+    fn checked_asset_set_epoch_bump(&self) -> V16Result<(u64, u64)> {
+        let next_asset_set_epoch = self
             .asset_set_epoch
             .checked_add(1)
             .ok_or(V16Error::CounterOverflow)?;
-        self.risk_epoch = self
+        let next_risk_epoch = self
             .risk_epoch
             .checked_add(1)
             .ok_or(V16Error::CounterOverflow)?;
-        Ok(())
+        Ok((next_asset_set_epoch, next_risk_epoch))
+    }
+
+    fn commit_asset_set_epoch_bump(&mut self, next_asset_set_epoch: u64, next_risk_epoch: u64) {
+        self.asset_set_epoch = next_asset_set_epoch;
+        self.risk_epoch = next_risk_epoch;
     }
 
     fn require_asset_active_for_risk_increase(&self, asset_index: usize) -> V16Result<()> {

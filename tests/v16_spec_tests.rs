@@ -898,6 +898,172 @@ fn v16_counterparty_lien_lifecycle_never_inflates_available_backing() {
 }
 
 #[test]
+fn v16_counterparty_lien_consume_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_backing_buckets[0].consumed_liened_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.consume_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_consume_source_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_credit[0].spent_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.consume_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_impair_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_backing_buckets[0].impaired_liened_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.impair_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_impair_source_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_credit[0].impaired_liened_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.impair_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_create_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.source_backing_buckets[0].valid_liened_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.create_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_release_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_backing_buckets[0].fresh_unliened_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.release_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_release_epoch_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_credit[0].credit_epoch = u64::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.release_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
 fn v16_insurance_credit_reservation_lifecycle_tracks_encumbrance_once() {
     let mut g = group();
     g.vault = 100;
@@ -949,6 +1115,247 @@ fn v16_insurance_credit_reservation_lifecycle_tracks_encumbrance_once() {
         g.source_credit_available_backing_num(0),
         Ok(reserve - lien_impair - lien_consume)
     );
+}
+
+#[test]
+fn v16_insurance_lien_consume_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let reserve = 60 * BOUND_SCALE;
+    let lien = 20 * BOUND_SCALE;
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.reserve_insurance_credit_not_atomic(0, reserve).unwrap();
+    g.create_source_credit_lien_from_insurance_not_atomic(0, lien)
+        .unwrap();
+    g.insurance_credit_reservations[0].consumed_insurance_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let insurance_before = g.insurance;
+    let spent_before = g.insurance_domain_spent[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.consume_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.insurance, insurance_before);
+    assert_eq!(g.insurance_domain_spent[0], spent_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_insurance_lien_consume_domain_spent_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let reserve = 60 * BOUND_SCALE;
+    let lien = 20 * BOUND_SCALE;
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.reserve_insurance_credit_not_atomic(0, reserve).unwrap();
+    g.create_source_credit_lien_from_insurance_not_atomic(0, lien)
+        .unwrap();
+    g.insurance_domain_spent[0] = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let insurance_before = g.insurance;
+    let spent_before = g.insurance_domain_spent[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.consume_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.insurance, insurance_before);
+    assert_eq!(g.insurance_domain_spent[0], spent_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_insurance_lien_impair_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let reserve = 60 * BOUND_SCALE;
+    let lien = 20 * BOUND_SCALE;
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.reserve_insurance_credit_not_atomic(0, reserve).unwrap();
+    g.create_source_credit_lien_from_insurance_not_atomic(0, lien)
+        .unwrap();
+    g.insurance_credit_reservations[0].impaired_liened_insurance_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.impair_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_insurance_lien_impair_source_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let reserve = 60 * BOUND_SCALE;
+    let lien = 20 * BOUND_SCALE;
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.reserve_insurance_credit_not_atomic(0, reserve).unwrap();
+    g.create_source_credit_lien_from_insurance_not_atomic(0, lien)
+        .unwrap();
+    g.source_credit[0].impaired_liened_insurance_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.impair_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_insurance_lien_create_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let reserve = 60 * BOUND_SCALE;
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.reserve_insurance_credit_not_atomic(0, reserve).unwrap();
+    g.source_credit[0].valid_liened_insurance_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.create_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_insurance_lien_release_epoch_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let reserve = 60 * BOUND_SCALE;
+    let lien = 20 * BOUND_SCALE;
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.reserve_insurance_credit_not_atomic(0, reserve).unwrap();
+    g.create_source_credit_lien_from_insurance_not_atomic(0, lien)
+        .unwrap();
+    g.source_credit[0].credit_epoch = u64::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.release_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_reserve_insurance_credit_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.vault = 1;
+    g.insurance = 1;
+    g.insurance_domain_budget[0] = u128::MAX;
+    g.source_credit[0].insurance_credit_reserved_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let reservation_before = g.insurance_credit_reservations[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.reserve_insurance_credit_not_atomic(0, BOUND_SCALE),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.insurance_credit_reservations[0], reservation_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_source_credit_recompute_epoch_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.source_credit[0].positive_claim_bound_num = 100;
+    g.source_credit[0].exact_positive_claim_num = 100;
+    g.source_credit[0].fresh_reserved_backing_num = 50;
+    g.source_credit[0].credit_rate_num = CREDIT_RATE_SCALE;
+    g.source_credit[0].credit_epoch = u64::MAX;
+
+    let source_before = g.source_credit[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.recompute_source_credit_rate_not_atomic(0),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_source_positive_claim_add_epoch_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.source_credit[0].credit_epoch = u64::MAX;
+
+    let source_before = g.source_credit[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.add_source_positive_claim_bound_not_atomic(0, 1, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_source_positive_claim_add_bound_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.source_credit[0].positive_claim_bound_num = u128::MAX;
+    g.source_credit[0].exact_positive_claim_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.add_source_positive_claim_bound_not_atomic(0, 1, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
 }
 
 #[test]
@@ -1271,6 +1678,24 @@ fn v16_dynamic_header_activation_rejects_nonempty_disabled_slot() {
 }
 
 #[test]
+fn v16_dynamic_header_activation_rejects_market_id_counter_overflow_before_slot_mutation() {
+    let g = group();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 4).unwrap();
+    header.next_market_id = V16PodU64::new(u64::MAX);
+    let mut slot = EngineAssetSlotV16Account::default();
+    let before_slot = slot;
+    let before_header = header;
+
+    assert_eq!(
+        header.activate_empty_asset_slot_not_atomic(3, &mut slot, 123, 1),
+        Err(V16Error::CounterOverflow),
+        "activation must preflight market-id counter overflow"
+    );
+    assert_eq!(slot, before_slot);
+    assert_eq!(header, before_header);
+}
+
+#[test]
 fn v16_dynamic_slot_table_rejects_backing_identity_drift() {
     let g = group();
     let header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 4).unwrap();
@@ -1469,6 +1894,41 @@ fn v16_reused_asset_index_gets_monotonic_market_id_after_shutdown_timeout() {
         Err(V16Error::HiddenLeg),
         "stale source-credit claims from an old market_id must not bind to the reused slot"
     );
+}
+
+#[test]
+fn v16_asset_activation_counter_overflow_rejects_before_state_mutation() {
+    let mut g = group();
+    g.retire_empty_asset_not_atomic(0, 1).unwrap();
+    g.next_market_id = u64::MAX;
+    let before = g;
+
+    assert_eq!(
+        g.activate_empty_asset_not_atomic(0, 100, 2),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g, before);
+}
+
+#[test]
+fn v16_asset_lifecycle_epoch_overflow_rejects_before_state_mutation() {
+    let mut drain = group();
+    drain.asset_set_epoch = u64::MAX;
+    let before_drain = drain;
+    assert_eq!(
+        drain.mark_asset_drain_only_not_atomic(0),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(drain, before_drain);
+
+    let mut retire = group();
+    retire.risk_epoch = u64::MAX;
+    let before_retire = retire;
+    assert_eq!(
+        retire.retire_empty_asset_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(retire, before_retire);
 }
 
 #[test]
@@ -2799,6 +3259,31 @@ fn v16_dynamic_header_can_grow_and_activate_appended_market_slot() {
 }
 
 #[test]
+fn v16_dynamic_header_growth_counter_overflow_rejects_before_metadata_mutation() {
+    let g = MarketGroupV16::new(
+        ids().0,
+        V16Config::public_user_fund_with_market_slots(4, 16, 0, 10),
+    )
+    .unwrap();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 16).unwrap();
+    header.risk_epoch = V16PodU64::new(u64::MAX);
+
+    let before_capacity = header.asset_slot_capacity;
+    let before_config = header.config;
+    let before_asset_set_epoch = header.asset_set_epoch;
+    let before_risk_epoch = header.risk_epoch;
+
+    assert_eq!(
+        header.grow_asset_slot_capacity_not_atomic(32, 32),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(header.asset_slot_capacity, before_capacity);
+    assert_eq!(header.config, before_config);
+    assert_eq!(header.asset_set_epoch, before_asset_set_epoch);
+    assert_eq!(header.risk_epoch, before_risk_epoch);
+}
+
+#[test]
 fn v16_dynamic_header_capacity_is_wrapper_supplied_not_fixed_runtime_window() {
     let capacity = V16_MAX_MARKET_SLOTS_N as u32 + 25;
     let config = V16Config::public_user_fund_with_market_slots(4, 16, 0, 10);
@@ -3365,6 +3850,22 @@ fn v16_loss_stale_blocks_nonflat_withdrawal_even_if_no_positive_credit_suffices(
 }
 
 #[test]
+fn v16_loss_stale_does_not_block_flat_principal_withdrawal() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.loss_stale_active = true;
+
+    assert_eq!(
+        g.withdraw_not_atomic(&mut a, 25, &[10; V16_MAX_PORTFOLIO_ASSETS_N]),
+        Ok(())
+    );
+    assert_eq!(a.capital, 75);
+    assert_eq!(g.vault, 75);
+    assert_eq!(g.c_tot, 75);
+}
+
+#[test]
 fn v16_target_effective_lag_blocks_risk_increasing_trade_before_mutation() {
     let mut g = group();
     let mut long = account();
@@ -3446,6 +3947,23 @@ fn v16_target_effective_lag_blocks_nonflat_withdrawal_and_pnl_conversion() {
         g.convert_released_pnl_to_capital_not_atomic(&mut a),
         Err(V16Error::LockActive)
     );
+}
+
+#[test]
+fn v16_target_effective_lag_does_not_block_flat_principal_withdrawal() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.assets[0].effective_price = 100;
+    g.assets[0].raw_oracle_target_price = 120;
+
+    assert_eq!(
+        g.withdraw_not_atomic(&mut a, 25, &[100; V16_MAX_PORTFOLIO_ASSETS_N]),
+        Ok(())
+    );
+    assert_eq!(a.capital, 75);
+    assert_eq!(g.vault, 75);
+    assert_eq!(g.c_tot, 75);
 }
 
 #[test]
@@ -4265,6 +4783,25 @@ fn v16_same_slot_exposed_price_move_rejects_without_mutation() {
     assert_eq!(
         g.accrue_asset_to_not_atomic(0, 0, 2, 0, true),
         Err(V16Error::NonProgress)
+    );
+    assert_eq!(g, before);
+}
+
+#[test]
+fn v16_over_cap_exposed_price_move_routes_recovery_without_mutation() {
+    let mut g = group();
+    g.config.max_price_move_bps_per_slot = 100;
+    g.assets[0].effective_price = 100;
+    g.assets[0].raw_oracle_target_price = 100;
+    g.assets[0].fund_px_last = 100;
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    let before = g;
+
+    assert_eq!(
+        g.accrue_asset_to_not_atomic(0, 1, 102, 0, true),
+        Err(V16Error::RecoveryRequired)
     );
     assert_eq!(g, before);
 }
