@@ -8349,6 +8349,85 @@ fn proof_v16_resolved_payout_readiness_uses_exact_counters_and_bounds() {
 #[kani::proof]
 #[kani::unwind(130)]
 #[kani::solver(cadical)]
+fn proof_v16_resolved_bankrupt_negative_blocker_can_clear_without_recovery() {
+    let (market, _, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [44; 32], owner));
+    group.vault = 5;
+    group.mode = MarketModeV16::Resolved;
+    group.current_slot = 1;
+    group.resolved_slot = 1;
+    bankrupt.pnl = -3;
+    group.negative_pnl_account_count = 1;
+
+    let cleared = group.kani_settle_resolved_bankruptcy_negative_pnl(&mut bankrupt);
+
+    kani::cover!(
+        group.negative_pnl_account_count == 0,
+        "v16 resolved bankrupt negative blocker clear branch reachable"
+    );
+    assert_eq!(cleared, Ok(()));
+    assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(group.negative_pnl_account_count, 0);
+    assert!(group.bankruptcy_hlock_active);
+    assert!(!group.payout_snapshot_captured);
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_active_bankrupt_can_consume_insurance_and_clear_blocker() {
+    let (market, _, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [46; 32], owner));
+    group.vault = 5;
+    group.insurance = 5;
+    group.mode = MarketModeV16::Resolved;
+    group.current_slot = 1;
+    group.resolved_slot = 1;
+    bankrupt.pnl = -5;
+    group.negative_pnl_account_count = 1;
+    group.assets[0].stored_pos_count_long = 1;
+    group.assets[0].oi_eff_long_q = 1;
+    group.assets[0].loss_weight_sum_long = 1;
+    bankrupt.legs[0] = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: group.assets[0].market_id,
+        side: SideV16::Long,
+        basis_pos_q: 1,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: group.assets[0].epoch_long,
+        loss_weight: 1,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: group.assets[0].epoch_long,
+        b_stale: false,
+        stale: false,
+    };
+    bankrupt.active_bitmap[0] = 1;
+
+    let cleared = group.kani_settle_resolved_bankruptcy_negative_pnl(&mut bankrupt);
+
+    kani::cover!(
+        group.insurance_domain_spent[1] == 5,
+        "v16 resolved active bankrupt insurance spend branch reachable"
+    );
+    assert_eq!(cleared, Ok(()));
+    assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(group.negative_pnl_account_count, 0);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.insurance_domain_spent[1], 5);
+    assert!(!percolator::active_bitmap_is_empty(bankrupt.active_bitmap));
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
 fn proof_v16_pending_domain_barrier_does_not_freeze_unrelated_positive_credit() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();

@@ -4285,6 +4285,119 @@ impl MarketGroupV16 {
         Ok(paid)
     }
 
+    fn resolved_bankruptcy_attribution(
+        &self,
+        account: &PortfolioAccountV16,
+    ) -> V16Result<Option<(usize, SideV16)>> {
+        let ledger = account.close_progress;
+        if ledger.active && !ledger.canceled && !ledger.finalized && ledger.residual_remaining != 0
+        {
+            let asset_index = ledger.asset_index as usize;
+            self.validate_configured_asset_index(asset_index)?;
+            return Ok(Some((asset_index, opposite_side(ledger.domain_side))));
+        }
+
+        let mut out = None;
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active || leg.stale || leg.b_stale {
+                continue;
+            }
+            let candidate = (leg.asset_index as usize, leg.side);
+            self.validate_configured_asset_index(candidate.0)?;
+            if out.replace(candidate).is_some() {
+                return Ok(None);
+            }
+        }
+        Ok(out)
+    }
+
+    fn clear_resolved_unattributed_negative_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        if account.pnl >= 0 {
+            return Ok(());
+        }
+        self.bankruptcy_hlock_active = true;
+        self.set_account_pnl(account, 0)?;
+        account.health_cert.valid = false;
+        Ok(())
+    }
+
+    fn settle_resolved_bankruptcy_negative_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        if account.pnl >= 0 {
+            return Ok(());
+        }
+        if self.mode != MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
+        let Some((asset_index, bankrupt_side)) = self.resolved_bankruptcy_attribution(account)?
+        else {
+            return self.clear_resolved_unattributed_negative_pnl(account);
+        };
+
+        self.bankruptcy_hlock_active = true;
+        let gross_residual = account.pnl.unsigned_abs();
+        if !account.close_progress.active {
+            self.begin_close_progress_ledger(
+                account,
+                asset_index,
+                opposite_side(bankrupt_side),
+                gross_residual,
+            )?;
+        }
+
+        let insurance_used =
+            self.consume_domain_insurance_for_negative_pnl(asset_index, bankrupt_side, account)?;
+        if insurance_used != 0 {
+            self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
+        }
+
+        let residual = if account.pnl < 0 {
+            account.pnl.unsigned_abs()
+        } else {
+            0
+        };
+        if residual == 0 {
+            account.health_cert.valid = false;
+            return Ok(());
+        }
+
+        let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+            account,
+            asset_index,
+            bankrupt_side,
+            residual,
+        )?;
+        let cleared = outcome
+            .booked_loss
+            .checked_add(outcome.explicit_loss)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(residual);
+        let cleared_i128 = i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+        self.set_account_pnl(
+            account,
+            account
+                .pnl
+                .checked_add(cleared_i128)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        )?;
+        account.health_cert.valid = false;
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_settle_resolved_bankruptcy_negative_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        self.settle_resolved_bankruptcy_negative_pnl(account)
+    }
+
     pub fn charge_account_fee_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
@@ -6558,11 +6671,7 @@ impl MarketGroupV16 {
         self.sync_account_fee_to_slot_not_atomic(account, self.resolved_slot, fee_rate_per_slot)?;
         self.settle_negative_pnl_from_principal(account)?;
         if account.pnl < 0 {
-            self.declare_permissionless_recovery(
-                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-            )?;
-            self.assert_public_invariants()?;
-            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+            self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
         if !active_bitmap_is_empty(account.active_bitmap)
             || account.pnl < 0
@@ -6935,6 +7044,15 @@ impl MarketGroupV16 {
             ),
         };
         if weight_sum == 0 {
+            if self.mode == MarketModeV16::Resolved {
+                self.bankruptcy_hlock_active = true;
+                return Ok(BResidualBookingOutcomeV16 {
+                    booked_loss: 0,
+                    explicit_loss: residual_remaining,
+                    delta_b: 0,
+                    remaining_after: 0,
+                });
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -6946,6 +7064,15 @@ impl MarketGroupV16 {
             residual_remaining,
         )?;
         if engine_chunk == 0 {
+            if self.mode == MarketModeV16::Resolved {
+                self.bankruptcy_hlock_active = true;
+                return Ok(BResidualBookingOutcomeV16 {
+                    booked_loss: 0,
+                    explicit_loss: residual_remaining,
+                    delta_b: 0,
+                    remaining_after: 0,
+                });
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
             )?;
@@ -6958,6 +7085,15 @@ impl MarketGroupV16 {
         let delta_b = numerator / weight_sum;
         let new_rem = numerator % weight_sum;
         if delta_b == 0 || b_now.checked_add(delta_b).is_none() {
+            if self.mode == MarketModeV16::Resolved {
+                self.bankruptcy_hlock_active = true;
+                return Ok(BResidualBookingOutcomeV16 {
+                    booked_loss: 0,
+                    explicit_loss: residual_remaining,
+                    delta_b: 0,
+                    remaining_after: 0,
+                });
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
             )?;
