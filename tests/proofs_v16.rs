@@ -1,17 +1,18 @@
 #![cfg(kani)]
 
 use percolator::v16::{
-    account_equity, risk_notional_ceil, AssetLifecycleV16, BackingBucketStatusV16,
-    BackingBucketV16, CloseProgressLedgerV16, DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account,
-    HLockLaneV16, HealthCertV16, InsuranceCreditReservationV16, LiquidationRequestV16,
-    MarketGroupV16, MarketGroupV16Account, MarketGroupV16HeaderAccount, MarketModeV16,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, ProvenanceHeaderV16, RebalanceRequestV16,
-    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
-    SideV16, SourceCreditLienAggregateProofV16, SourceCreditStateV16, StockReconciliationProofV16,
-    TradeRequestV16, V16ActiveBitmap, V16Config, V16Error, V16PodI128, V16PodU64, V16_DOMAIN_COUNT,
-    V16_MAX_MARKET_SLOTS_N, V16_MAX_PORTFOLIO_ASSETS_N,
+    account_equity, risk_notional_ceil, AssetLifecycleV16, BResidualBookingOutcomeV16,
+    BackingBucketStatusV16, BackingBucketV16, CloseProgressLedgerV16, DeadLegForfeitOutcomeV16,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, InsuranceCreditReservationV16,
+    LiquidationRequestV16, MarketGroupV16, MarketGroupV16Account, MarketGroupV16HeaderAccount,
+    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, ProvenanceHeaderV16,
+    RebalanceRequestV16, ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16,
+    ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditLienAggregateProofV16,
+    SourceCreditStateV16, StockReconciliationProofV16, TradeRequestV16, V16ActiveBitmap, V16Config,
+    V16Error, V16PodI128, V16PodU64, V16_DOMAIN_COUNT, V16_MAX_MARKET_SLOTS_N,
+    V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_OI_SIDE_Q, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q,
@@ -8423,6 +8424,41 @@ fn proof_v16_resolved_active_bankrupt_can_consume_insurance_and_clear_blocker() 
     assert_eq!(group.insurance, 0);
     assert_eq!(group.insurance_domain_spent[1], 5);
     assert!(!percolator::active_bitmap_is_empty(bankrupt.active_bitmap));
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_residual_without_counterweight_becomes_explicit_terminal_loss() {
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    group.mode = MarketModeV16::Resolved;
+    group.current_slot = 1;
+    group.resolved_slot = 1;
+    let out = group.kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, 5);
+
+    kani::cover!(
+        out == Ok(BResidualBookingOutcomeV16 {
+            booked_loss: 0,
+            explicit_loss: 5,
+            delta_b: 0,
+            remaining_after: 0,
+        }),
+        "v16 resolved no-counterweight residual explicit-loss branch reachable"
+    );
+    assert_eq!(
+        out,
+        Ok(BResidualBookingOutcomeV16 {
+            booked_loss: 0,
+            explicit_loss: 5,
+            delta_b: 0,
+            remaining_after: 0,
+        })
+    );
+    assert!(group.bankruptcy_hlock_active);
+    assert_eq!(group.recovery_reason, None);
+    assert_eq!(group.assets[0].b_short_num, 0);
+    assert_eq!(group.assets[0].social_loss_remainder_short_num, 0);
 }
 
 #[kani::proof]

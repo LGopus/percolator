@@ -6903,6 +6903,43 @@ fn v16_resolved_bankrupt_active_negative_consumes_insurance_then_unblocks_winner
 }
 
 #[test]
+fn v16_resolved_bankrupt_active_negative_without_counterweight_clears_as_explicit_terminal_loss() {
+    let (market, _, owner) = ids();
+    let mut g = group();
+    let mut bankrupt =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [48; 32], owner));
+    let mut winner = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [49; 32], owner));
+    g.vault = 5;
+    bankrupt.pnl = -5;
+    winner.pnl = 5;
+    g.negative_pnl_account_count = 1;
+    g.pnl_pos_tot = 5;
+    set_junior_bound(&mut g, 5);
+    g.attach_leg(&mut bankrupt, 0, SideV16::Long, 1).unwrap();
+    g.resolve_market_not_atomic(1).unwrap();
+
+    let bankrupt_progress = g.close_resolved_account_not_atomic(&mut bankrupt, 0);
+
+    assert_eq!(bankrupt_progress, Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(g.negative_pnl_account_count, 0);
+    assert_eq!(g.recovery_reason, None);
+    assert!(g.bankruptcy_hlock_active);
+    assert_eq!(bankrupt.close_progress.explicit_loss_assigned, 5);
+    assert_eq!(bankrupt.close_progress.residual_remaining, 0);
+    assert!(bankrupt.close_progress.finalized);
+
+    g.clear_leg(&mut bankrupt, 0).unwrap();
+    let winner_close = g.close_resolved_account_not_atomic(&mut winner, 0);
+
+    assert_eq!(
+        winner_close,
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 5 })
+    );
+    assert_eq!(g.vault, 0);
+}
+
+#[test]
 fn v16_resolved_positive_payout_waits_for_pending_domain_loss_barrier() {
     let mut g = group();
     let mut a = account();
