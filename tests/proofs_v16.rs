@@ -11837,7 +11837,7 @@ fn proof_v16_liquidation_fee_floor_shortfall_charges_available_capital_only() {
 #[kani::proof]
 #[kani::unwind(130)]
 #[kani::solver(cadical)]
-fn proof_v16_resolved_active_position_close_returns_progress_without_payout() {
+fn proof_v16_resolved_active_position_close_detaches_leg_and_pays_capital() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
@@ -11845,14 +11845,18 @@ fn proof_v16_resolved_active_position_close_returns_progress_without_payout() {
     group.deposit_not_atomic(&mut account, 7).unwrap();
     group.attach_leg(&mut account, 0, SideV16::Long, 1).unwrap();
     group.resolve_market_not_atomic(1).unwrap();
-    let before_vault = group.vault;
-    let before_c_tot = group.c_tot;
 
     let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
 
-    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV16::ProgressOnly));
-    assert!(!percolator::active_bitmap_is_empty(account.active_bitmap));
-    assert_eq!(account.capital, 7);
-    assert_eq!(group.vault, before_vault);
-    assert_eq!(group.c_tot, before_c_tot);
+    // Parity with v12 `reconcile_resolved_not_atomic` ->
+    // `clear_position_basis_q`: a solvent active leg on a Resolved market is
+    // detached inside `close_resolved_account_not_atomic` after K/F/B
+    // settlement, the bitmap clears, and capital is paid out.
+    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV16::Closed { payout: 7 }));
+    assert!(percolator::active_bitmap_is_empty(account.active_bitmap));
+    assert_eq!(account.capital, 0);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.assets[0].stored_pos_count_long, 0);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
 }

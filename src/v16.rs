@@ -15342,6 +15342,15 @@ impl MarketGroupV16 {
         if account.pnl < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
+        // Detach solvent active legs after K/F/B settlement so the close
+        // can complete. Mirrors v12 `reconcile_resolved_not_atomic`'s
+        // `clear_position_basis_q` step (legacy `src/percolator.rs:9948`)
+        // ported forward to v16's multi-leg portfolio. Bankrupt accounts
+        // (pnl < 0 or active close ledger with residual) take the
+        // `settle_resolved_bankruptcy_negative_pnl` /
+        // `apply_quantity_adl_after_residual_for_account_not_atomic` path
+        // instead; this helper is a no-op for them.
+        self.detach_solvent_active_legs_for_resolved_close(account)?;
         if !active_bitmap_is_empty(account.active_bitmap)
             || account.pnl < 0
             || account.b_stale_state
@@ -15399,6 +15408,84 @@ impl MarketGroupV16 {
         .validate()?;
         self.assert_public_invariants()?;
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
+    }
+
+    /// Detach all active legs for a solvent account after K/F/B settlement on a
+    /// Resolved market. Called from `close_resolved_account_not_atomic` to
+    /// release the `stored_pos_count_*` / `loss_weight_sum_*` / `oi_eff_*`
+    /// accounting that `resolved_positive_payout_ready` depends on.
+    ///
+    /// Direct parity with v12's `reconcile_resolved_not_atomic` →
+    /// `clear_position_basis_q(i)` step (legacy `src/percolator.rs:9948`).
+    /// Without this call, solvent users with active legs at resolve time
+    /// cannot detach through any wrapper-callable instruction; see
+    /// `https://github.com/aeyakovenko/percolator/issues/61` for the spec
+    /// references (§12 lines 1381 and 1413) and the regression vs v12.
+    ///
+    /// Semantics:
+    ///
+    /// * The caller MUST have already run
+    ///   `settle_account_side_effects_not_atomic` to `AccountCurrent` so that
+    ///   `k_target == k_snap` / `f_target == f_snap` / `b_target == b_snap`
+    ///   and `account.b_stale_state` is cleared.
+    /// * If the account is bankrupt (`pnl < 0`) or has an active close
+    ///   ledger with pending residual, this helper is a no-op; the
+    ///   bankruptcy resolution path (`settle_resolved_bankruptcy_negative_pnl`
+    ///   + `apply_quantity_adl_after_residual_for_account_not_atomic`) handles
+    ///   detach for those accounts via `clear_leg_after_quantity_adl`.
+    /// * If any active leg fails a `clear_leg` precondition that can clear
+    ///   on a retry (e.g. a pending domain loss barrier whose owning
+    ///   counterparty still needs to settle), this helper is a no-op so that
+    ///   the existing `active_bitmap_is_empty` gate in
+    ///   `close_resolved_account_not_atomic` returns `ProgressOnly`.
+    ///   Hard failures (corrupt epoch shape, etc.) still propagate as `Err`.
+    /// * When the leg's side is in `ResetPending` after a full-drain ADL,
+    ///   `clear_leg` internally skips the `oi_eff_*` / `loss_weight_sum_*`
+    ///   decrements (the side's accounting was zeroed by
+    ///   `apply_quantity_adl_after_residual_internal` /
+    ///   `begin_full_drain_reset_inner`) and only decrements
+    ///   `stored_pos_count_*`. This helper inherits that behavior.
+    fn detach_solvent_active_legs_for_resolved_close(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        if account.pnl < 0 || account.close_progress.has_pending_residual() {
+            return Ok(());
+        }
+        // Pre-check every active leg against `clear_leg`'s clearable shape.
+        // If any leg fails on a transient condition, fall through unchanged
+        // so the existing `active_bitmap_is_empty` gate returns ProgressOnly.
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
+                continue;
+            }
+            if leg.b_stale || leg.stale {
+                return Ok(());
+            }
+            let asset_index = leg.asset_index as usize;
+            if asset_index >= self.config.max_market_slots as usize {
+                return Err(V16Error::InvalidLeg);
+            }
+            if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+                return Ok(());
+            }
+            let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+            if k_target != leg.k_snap || f_target != leg.f_snap {
+                return Ok(());
+            }
+            if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
+                return Ok(());
+            }
+        }
+        // All clearable: detach in slot order.
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            if account.legs[slot].active {
+                let asset_index = account.legs[slot].asset_index as usize;
+                self.clear_leg(account, asset_index)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn claim_resolved_payout_topup_not_atomic(

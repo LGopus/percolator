@@ -8822,23 +8822,92 @@ fn v16_resolved_profit_close_pays_from_snapshot_residual_and_clears_claim() {
 }
 
 #[test]
-fn v16_resolved_close_with_active_position_returns_progress_only() {
+fn v16_resolved_close_with_active_position_detaches_leg_and_pays_capital() {
     let mut g = group();
     let mut a = account();
     g.deposit_not_atomic(&mut a, 777).unwrap();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
     g.resolve_market_not_atomic(1).unwrap();
-    let before_vault = g.vault;
-    let before_c_tot = g.c_tot;
 
     let out = g.close_resolved_account_not_atomic(&mut a, 0).unwrap();
 
-    assert_eq!(out, ResolvedCloseOutcomeV16::ProgressOnly);
-    assert_eq!(a.capital, 777);
-    assert_ne!(a.active_bitmap, bitmap(&[]));
-    assert_eq!(g.vault, before_vault);
-    assert_eq!(g.c_tot, before_c_tot);
+    // Solvent active legs are detached inside close_resolved (parity with
+    // v12 `reconcile_resolved_not_atomic` -> `clear_position_basis_q`).
+    assert_eq!(out, ResolvedCloseOutcomeV16::Closed { payout: 777 });
+    assert_eq!(a.capital, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
+    assert_eq!(g.vault, 0);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(g.assets[0].stored_pos_count_long, 0);
+}
+
+#[test]
+fn v16_resolved_close_detaches_balanced_counterparties_paying_both() {
+    // Two solvent users on opposite sides of the same asset, both with zero
+    // mark-to-market PnL. After resolve, each can close in a single
+    // `close_resolved_account_not_atomic` call: the helper detaches their
+    // leg, the bitmap clears, capital is paid out from the vault.
+    let (market, _, owner) = ids();
+    let mut g = group();
+    let mut long_acct =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [60; 32], owner));
+    let mut short_acct =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [61; 32], owner));
+    g.deposit_not_atomic(&mut long_acct, 1_000).unwrap();
+    g.deposit_not_atomic(&mut short_acct, 1_000).unwrap();
+    g.attach_leg(&mut long_acct, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut short_acct, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.resolve_market_not_atomic(1).unwrap();
+
+    let long_close = g.close_resolved_account_not_atomic(&mut long_acct, 0);
+    assert_eq!(
+        long_close,
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000 })
+    );
+    assert_eq!(long_acct.capital, 0);
+    assert_eq!(long_acct.active_bitmap, bitmap(&[]));
+
+    let short_close = g.close_resolved_account_not_atomic(&mut short_acct, 0);
+    assert_eq!(
+        short_close,
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000 })
+    );
+    assert_eq!(short_acct.capital, 0);
+    assert_eq!(short_acct.active_bitmap, bitmap(&[]));
+
+    assert_eq!(g.vault, 0);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(g.assets[0].stored_pos_count_long, 0);
+    assert_eq!(g.assets[0].stored_pos_count_short, 0);
+}
+
+#[test]
+fn v16_resolved_close_detaches_multi_asset_legs_in_single_call() {
+    // A solvent account with active legs across two different assets closes
+    // in one `close_resolved_account_not_atomic` call. Both legs are
+    // detached by the helper and both per-asset `stored_pos_count_long`
+    // counters reach zero.
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 500).unwrap();
+    g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut a, 1, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.resolve_market_not_atomic(1).unwrap();
+
+    let out = g.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+
+    assert_eq!(out, ResolvedCloseOutcomeV16::Closed { payout: 500 });
+    assert_eq!(a.capital, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[]));
+    assert_eq!(g.vault, 0);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(g.assets[0].stored_pos_count_long, 0);
+    assert_eq!(g.assets[1].stored_pos_count_long, 0);
 }
 
 #[test]
@@ -8960,15 +9029,23 @@ fn v16_resolved_bankrupt_active_negative_consumes_insurance_then_unblocks_winner
     g.attach_leg(&mut bankrupt, 0, SideV16::Long, 1).unwrap();
     g.resolve_market_not_atomic(1).unwrap();
 
-    let bankrupt_progress = g.close_resolved_account_not_atomic(&mut bankrupt, 0);
+    let bankrupt_close = g.close_resolved_account_not_atomic(&mut bankrupt, 0);
 
-    assert_eq!(bankrupt_progress, Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    // Insurance covers the bankrupt's residual, the close ledger finalizes
+    // with `residual_remaining == 0`, and the bankrupt's leg is detached
+    // by `close_resolved_account_not_atomic` in the same call (parity with
+    // v12 `reconcile_resolved_not_atomic` -> `clear_position_basis_q`).
+    assert_eq!(
+        bankrupt_close,
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 })
+    );
     assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(bankrupt.active_bitmap, bitmap(&[]));
     assert_eq!(g.negative_pnl_account_count, 0);
     assert_eq!(g.insurance, 0);
     assert_eq!(g.insurance_domain_spent[1], 5);
+    assert_eq!(g.assets[0].stored_pos_count_long, 0);
 
-    g.clear_leg(&mut bankrupt, 0).unwrap();
     let winner_close = g.close_resolved_account_not_atomic(&mut winner, 0);
 
     assert_eq!(
@@ -8994,18 +9071,27 @@ fn v16_resolved_bankrupt_active_negative_without_counterweight_clears_as_explici
     g.attach_leg(&mut bankrupt, 0, SideV16::Long, 1).unwrap();
     g.resolve_market_not_atomic(1).unwrap();
 
-    let bankrupt_progress = g.close_resolved_account_not_atomic(&mut bankrupt, 0);
+    let bankrupt_close = g.close_resolved_account_not_atomic(&mut bankrupt, 0);
 
-    assert_eq!(bankrupt_progress, Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    // Without a counterweight the residual is booked as explicit loss
+    // (`bankruptcy_hlock_active` set, `close_progress.finalized`), and the
+    // bankrupt's leg is detached by `close_resolved_account_not_atomic` in
+    // the same call (parity with v12 `reconcile_resolved_not_atomic` ->
+    // `clear_position_basis_q`).
+    assert_eq!(
+        bankrupt_close,
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 })
+    );
     assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(bankrupt.active_bitmap, bitmap(&[]));
     assert_eq!(g.negative_pnl_account_count, 0);
     assert_eq!(g.recovery_reason, None);
     assert!(g.bankruptcy_hlock_active);
     assert_eq!(bankrupt.close_progress.explicit_loss_assigned, 5);
     assert_eq!(bankrupt.close_progress.residual_remaining, 0);
     assert!(bankrupt.close_progress.finalized);
+    assert_eq!(g.assets[0].stored_pos_count_long, 0);
 
-    g.clear_leg(&mut bankrupt, 0).unwrap();
     let winner_close = g.close_resolved_account_not_atomic(&mut winner, 0);
 
     assert_eq!(
