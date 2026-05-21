@@ -1,16 +1,17 @@
 use percolator::v16::{
     account_equity, risk_notional_ceil, AssetLifecycleV16, AssetStateV16Account,
-    CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account,
-    LiquidationRequestV16, MarketGroupV16, MarketGroupV16Account, MarketGroupV16HeaderAccount,
-    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
-    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, ProvenanceHeaderV16,
+    CloseProgressLedgerV16, EngineAssetSlotV16Account, EngineAssetSlotWithExtV16Account,
+    HLockLaneV16, HealthCertV16Account, LiquidationRequestV16, MarketGroupV16,
+    MarketGroupV16HeaderAccount, MarketModeV16, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, ProvenanceHeaderV16,
     ProvenanceHeaderV16Account, RebalanceRequestV16, ReservationEncumbranceProofV16,
     ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
     SideV16, SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
     TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64,
-    V16_DOMAIN_COUNT, V16_MAX_MARKET_SLOTS_N, V16_MAX_PORTFOLIO_ASSETS_N,
+    V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE,
@@ -1596,15 +1597,17 @@ fn v16_persisted_account_wire_structs_are_bytemuck_pod() {
     assert_pod_zeroable::<EngineAssetSlotV16Account>();
     assert_pod_zeroable::<PortfolioLegV16Account>();
     assert_pod_zeroable::<HealthCertV16Account>();
+    assert_pod_zeroable::<PortfolioSourceDomainV16Account>();
     assert_pod_zeroable::<PortfolioAccountV16Account>();
-    assert_pod_zeroable::<MarketGroupV16Account>();
 
     assert_eq!(core::mem::align_of::<PortfolioAccountV16Account>(), 1);
-    assert_eq!(core::mem::align_of::<MarketGroupV16Account>(), 1);
+    assert_eq!(core::mem::align_of::<PortfolioSourceDomainV16Account>(), 1);
+    assert_eq!(core::mem::align_of::<MarketGroupV16HeaderAccount>(), 1);
+    assert_eq!(core::mem::align_of::<EngineAssetSlotV16Account>(), 1);
 }
 
 #[test]
-fn v16_persisted_account_wire_roundtrips_runtime_state() {
+fn v16_dynamic_persisted_wire_roundtrips_runtime_state_from_wrapper_slices() {
     let mut g = group();
     let mut a = account();
     g.create_portfolio_account(&a).unwrap();
@@ -1615,25 +1618,46 @@ fn v16_persisted_account_wire_roundtrips_runtime_state() {
     g.full_account_refresh(&mut a, &[100; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
-    let wire_group = MarketGroupV16Account::from_runtime(&g);
+    let wire_group =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let wire_slots = (0..g.assets.len())
+        .map(|i| EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap())
+        .collect::<Vec<_>>();
     let wire_account = PortfolioAccountV16Account::from_runtime(&a);
+    let wire_source_domains = PortfolioAccountV16Account::source_domains_from_runtime(&a).unwrap();
     let group_bytes = bytemuck::bytes_of(&wire_group);
+    let slot_bytes = bytemuck::cast_slice::<EngineAssetSlotV16Account, u8>(&wire_slots);
     let account_bytes = bytemuck::bytes_of(&wire_account);
+    let source_domain_bytes =
+        bytemuck::cast_slice::<PortfolioSourceDomainV16Account, u8>(&wire_source_domains);
 
     assert_eq!(
         group_bytes.len(),
-        core::mem::size_of::<MarketGroupV16Account>()
+        core::mem::size_of::<MarketGroupV16HeaderAccount>()
+    );
+    assert_eq!(
+        slot_bytes.len(),
+        g.assets.len() * core::mem::size_of::<EngineAssetSlotV16Account>()
     );
     assert_eq!(
         account_bytes.len(),
         core::mem::size_of::<PortfolioAccountV16Account>()
     );
+    assert_eq!(
+        source_domain_bytes.len(),
+        wire_source_domains.len() * core::mem::size_of::<PortfolioSourceDomainV16Account>()
+    );
 
-    let decoded_group = *bytemuck::from_bytes::<MarketGroupV16Account>(group_bytes);
+    let decoded_group = *bytemuck::from_bytes::<MarketGroupV16HeaderAccount>(group_bytes);
+    let decoded_slots = bytemuck::cast_slice::<u8, EngineAssetSlotV16Account>(slot_bytes);
     let decoded_account = *bytemuck::from_bytes::<PortfolioAccountV16Account>(account_bytes);
-    let runtime_group = decoded_group.validate().unwrap();
+    let decoded_source_domains =
+        bytemuck::cast_slice::<u8, PortfolioSourceDomainV16Account>(source_domain_bytes);
+    let runtime_group = decoded_group
+        .try_to_runtime_with_slots(decoded_slots)
+        .unwrap();
     let runtime_account = decoded_account
-        .validate_with_market(&runtime_group)
+        .validate_with_market(&runtime_group, decoded_source_domains)
         .unwrap();
 
     assert_eq!(runtime_group, g);
@@ -1648,61 +1672,107 @@ fn v16_persisted_account_wire_rejects_invalid_bool_enum_and_option_encoding() {
     let mut bad_account_bool = PortfolioAccountV16Account::from_runtime(&a);
     bad_account_bool.stale_state = 2;
     assert_eq!(
-        bad_account_bool.try_to_runtime(),
+        bad_account_bool.try_to_runtime_with_source_domains(&[]),
         Err(V16Error::InvalidConfig)
     );
 
     let mut bad_close_bool = PortfolioAccountV16Account::from_runtime(&a);
     bad_close_bool.close_progress.canceled = 2;
     assert_eq!(
-        bad_close_bool.try_to_runtime(),
+        bad_close_bool.try_to_runtime_with_source_domains(&[]),
         Err(V16Error::InvalidConfig)
     );
 
     let mut bad_leg_enum = PortfolioAccountV16Account::from_runtime(&a);
     bad_leg_enum.legs[0].active = 1;
     bad_leg_enum.legs[0].side = 9;
-    assert_eq!(bad_leg_enum.try_to_runtime(), Err(V16Error::InvalidConfig));
+    assert_eq!(
+        bad_leg_enum.try_to_runtime_with_source_domains(&[]),
+        Err(V16Error::InvalidConfig)
+    );
 
-    let mut bad_market_mode = MarketGroupV16Account::from_runtime(&g);
+    let mut bad_market_mode =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
     bad_market_mode.mode = 9;
     assert_eq!(
-        bad_market_mode.try_to_runtime(),
+        bad_market_mode.try_to_runtime_with_slots(&[
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+        ]),
         Err(V16Error::InvalidConfig)
     );
 
-    let mut bad_config_bool = MarketGroupV16Account::from_runtime(&g);
+    let mut bad_config_bool =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
     bad_config_bool.config.recovery_fallback_price_enabled = 2;
     assert_eq!(
-        bad_config_bool.try_to_runtime(),
+        bad_config_bool.try_to_runtime_with_slots(&[
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+        ]),
         Err(V16Error::InvalidConfig)
     );
 
-    let mut bad_side_mode = MarketGroupV16Account::from_runtime(&g);
-    bad_side_mode.asset_slots[0].asset.mode_long = 9;
-    assert_eq!(bad_side_mode.try_to_runtime(), Err(V16Error::InvalidConfig));
-
-    let mut bad_asset_lifecycle = MarketGroupV16Account::from_runtime(&g);
-    bad_asset_lifecycle.asset_slots[0].asset.lifecycle = 9;
+    let header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut bad_side_slots = [
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+    ];
+    bad_side_slots[0].asset.mode_long = 9;
     assert_eq!(
-        bad_asset_lifecycle.try_to_runtime(),
+        header.try_to_runtime_with_slots(&bad_side_slots),
         Err(V16Error::InvalidConfig)
     );
 
-    let mut bad_option = MarketGroupV16Account::from_runtime(&g);
+    let mut bad_lifecycle_slots = [
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+    ];
+    bad_lifecycle_slots[0].asset.lifecycle = 9;
+    assert_eq!(
+        header.try_to_runtime_with_slots(&bad_lifecycle_slots),
+        Err(V16Error::InvalidConfig)
+    );
+
+    let mut bad_option =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
     bad_option.recovery_reason.present = 0;
     bad_option.recovery_reason.value = 1;
-    assert_eq!(bad_option.try_to_runtime(), Err(V16Error::InvalidConfig));
+    assert_eq!(
+        bad_option.try_to_runtime_with_slots(&[
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+            EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+        ]),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[test]
 fn v16_persisted_market_wire_rejects_backing_slot_market_id_drift() {
     let g = group();
-    let mut bad = MarketGroupV16Account::from_runtime(&g);
-    bad.asset_slots[0].backing_long.market_id = V16PodU64::new(g.assets[0].market_id + 1);
+    let header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut slots = [
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 0).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 1).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 2).unwrap(),
+        EngineAssetSlotV16Account::from_runtime_group_slot(&g, 3).unwrap(),
+    ];
+    slots[0].backing_long.market_id = V16PodU64::new(g.assets[0].market_id + 1);
 
     assert_eq!(
-        bad.try_to_runtime(),
+        header.try_to_runtime_with_slots(&slots),
         Err(V16Error::InvalidConfig),
         "zero-copy market state must reject backing buckets not bound to their asset slot"
     );
@@ -1729,6 +1799,98 @@ fn v16_dynamic_market_header_and_slot_table_roundtrip_runtime_state() {
         MarketGroupV16HeaderAccount::dynamic_market_group_account_len(4, 24).unwrap(),
         core::mem::size_of::<MarketGroupV16HeaderAccount>()
             + 4 * (core::mem::size_of::<EngineAssetSlotV16Account>() + 24)
+    );
+}
+
+#[test]
+fn v16_market_header_decodes_wrapper_owned_overallocated_slot_slice() {
+    let g = group();
+    let capacity = g.config.max_market_slots as usize + 3;
+    let header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, capacity).unwrap();
+    let mut slots = (0..g.assets.len())
+        .map(|i| EngineAssetSlotWithExtV16Account {
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+            ext: 0xA5A5_0000u64 + i as u64,
+        })
+        .collect::<Vec<_>>();
+    while slots.len() < capacity {
+        let idx = slots.len();
+        slots.push(EngineAssetSlotWithExtV16Account {
+            engine: EngineAssetSlotV16Account::empty_for_market(0),
+            ext: 0xFFFF_0000u64 + idx as u64,
+        });
+    }
+
+    let decoded = header.try_to_runtime_with_market_slots(&slots).unwrap();
+
+    assert_eq!(decoded.config.max_market_slots, g.config.max_market_slots);
+    assert_eq!(decoded.assets.len(), capacity);
+    assert_eq!(&decoded.assets[..g.assets.len()], &g.assets[..]);
+    assert_eq!(decoded.source_credit.len(), capacity * 2);
+    for asset in &decoded.assets[g.assets.len()..] {
+        assert_eq!(asset.lifecycle, AssetLifecycleV16::Disabled);
+        assert_eq!(asset.market_id, 0);
+    }
+    assert_eq!(
+        slots[capacity - 1].ext,
+        0xFFFF_0000u64 + capacity as u64 - 1
+    );
+}
+
+#[test]
+fn v16_market_header_decodes_zero_filled_realloc_slots_after_growth() {
+    let g = group();
+    let capacity = g.config.max_market_slots as usize + 4;
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, capacity).unwrap();
+    header
+        .grow_asset_slot_capacity_not_atomic(capacity as u32, capacity as u32)
+        .unwrap();
+    let mut slots = (0..g.assets.len())
+        .map(|i| EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap())
+        .collect::<Vec<_>>();
+    while slots.len() < capacity {
+        slots.push(EngineAssetSlotV16Account::default());
+    }
+    header
+        .activate_empty_asset_slot_not_atomic(capacity as u32 - 2, &mut slots[capacity - 2], 222, 1)
+        .unwrap();
+
+    let decoded = header.try_to_runtime_with_slots(&slots).unwrap();
+
+    assert_eq!(decoded.assets.len(), capacity);
+    assert_eq!(decoded.assets[capacity - 2].effective_price, 222);
+    assert_eq!(
+        decoded.assets[capacity - 1].lifecycle,
+        AssetLifecycleV16::Disabled
+    );
+    assert_eq!(decoded.assets[capacity - 1].market_id, 0);
+    assert_eq!(
+        decoded.source_credit[capacity * 2 - 1],
+        percolator::v16::SourceCreditStateV16::EMPTY
+    );
+}
+
+#[test]
+fn v16_market_header_rejects_nonempty_hidden_wrapper_slot() {
+    let g = group();
+    let capacity = g.config.max_market_slots as usize + 1;
+    let header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, capacity).unwrap();
+    let mut slots = (0..g.assets.len())
+        .map(|i| EngineAssetSlotWithExtV16Account {
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+            ext: (),
+        })
+        .collect::<Vec<_>>();
+    slots.push(EngineAssetSlotWithExtV16Account {
+        engine: EngineAssetSlotV16Account::empty_for_market(0),
+        ext: (),
+    });
+    slots[g.assets.len()].engine.asset.market_id = V16PodU64::new(99);
+
+    assert_eq!(
+        header.try_to_runtime_with_market_slots(&slots),
+        Err(V16Error::InvalidConfig),
+        "wrapper-owned spare slots must be empty until config exposes them"
     );
 }
 
@@ -1982,6 +2144,7 @@ fn v16_reused_asset_index_gets_monotonic_market_id_after_shutdown_timeout() {
     );
 
     let mut stale_claim = account();
+    stale_claim.ensure_source_domain_capacity(2);
     stale_claim.pnl = 1;
     stale_claim.source_claim_market_id[0] = old_market_id;
     stale_claim.source_claim_bound_num[0] = BOUND_SCALE;
@@ -1997,7 +2160,7 @@ fn v16_asset_activation_counter_overflow_rejects_before_state_mutation() {
     let mut g = group();
     g.retire_empty_asset_not_atomic(0, 1).unwrap();
     g.next_market_id = u64::MAX;
-    let before = g;
+    let before = g.clone();
 
     assert_eq!(
         g.activate_empty_asset_not_atomic(0, 100, 2),
@@ -2010,7 +2173,7 @@ fn v16_asset_activation_counter_overflow_rejects_before_state_mutation() {
 fn v16_asset_lifecycle_epoch_overflow_rejects_before_state_mutation() {
     let mut drain = group();
     drain.asset_set_epoch = u64::MAX;
-    let before_drain = drain;
+    let before_drain = drain.clone();
     assert_eq!(
         drain.mark_asset_drain_only_not_atomic(0),
         Err(V16Error::CounterOverflow)
@@ -2019,7 +2182,7 @@ fn v16_asset_lifecycle_epoch_overflow_rejects_before_state_mutation() {
 
     let mut retire = group();
     retire.risk_epoch = u64::MAX;
-    let before_retire = retire;
+    let before_retire = retire.clone();
     assert_eq!(
         retire.retire_empty_asset_not_atomic(0, 1),
         Err(V16Error::CounterOverflow)
@@ -2036,7 +2199,7 @@ fn v16_retired_asset_idempotence_still_requires_empty_state() {
     g.assets[0].oi_eff_long_q = 1;
     g.assets[0].stored_pos_count_long = 1;
     g.assets[0].loss_weight_sum_long = 1;
-    let before = g;
+    let before = g.clone();
 
     assert_eq!(
         g.retire_empty_asset_not_atomic(0, 1),
@@ -2110,7 +2273,7 @@ fn v16_same_asset_duplicate_leg_cannot_double_count_support() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
-    let account_before = a;
+    let account_before = a.clone();
     let asset_before = g.assets[0];
 
     assert_eq!(
@@ -2275,8 +2438,8 @@ fn v16_global_residual_is_not_account_health_proof() {
     assert_eq!(g.assert_public_invariants(), Ok(()));
     assert!(!a.health_cert.valid);
 
-    let before_group = g;
-    let before_account = a;
+    let before_group = g.clone();
+    let before_account = a.clone();
     assert_eq!(
         g.convert_released_pnl_to_capital_not_atomic(&mut a),
         Err(V16Error::Stale)
@@ -2779,8 +2942,14 @@ fn v16_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b
     assert_eq!(cert.certified_equity, 2);
     assert_eq!(cert.certified_maintenance_req, 2);
     assert_eq!(cert.certified_liq_deficit, 0);
-    assert_eq!(g.insurance_domain_spent, [0; V16_DOMAIN_COUNT]);
-    assert_eq!(g.pending_domain_loss_barriers, [0; V16_DOMAIN_COUNT]);
+    assert_eq!(
+        g.insurance_domain_spent,
+        vec![0; g.insurance_domain_spent.len()]
+    );
+    assert_eq!(
+        g.pending_domain_loss_barriers,
+        vec![0; g.pending_domain_loss_barriers.len()]
+    );
     assert_eq!(g.assets[0].b_long_num, 0);
     assert_eq!(g.assets[0].b_short_num, 0);
     assert_eq!(g.assets[1].b_long_num, 0);
@@ -2937,7 +3106,7 @@ fn v16_public_init_rejects_zero_price_move_cap() {
 #[test]
 fn v16_oracle_price_zero_rejected_and_max_price_accepted_when_unexposed() {
     let mut g = group();
-    let before = g;
+    let before = g.clone();
 
     assert_eq!(
         g.accrue_asset_to_not_atomic(0, 1, 0, 0, false),
@@ -3053,9 +3222,9 @@ fn v16_min_nonzero_initial_floor_blocks_tiny_risk_increasing_trade() {
     let mut short = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
     g.deposit_not_atomic(&mut long, 49).unwrap();
     g.deposit_not_atomic(&mut short, 100).unwrap();
-    let before_group = g;
-    let before_long = long;
-    let before_short = short;
+    let before_group = g.clone();
+    let before_long = long.clone();
+    let before_short = short.clone();
 
     let result = g.execute_trade_with_fee_not_atomic(
         &mut long,
@@ -3386,7 +3555,7 @@ fn v16_market_slots_can_exceed_portfolio_active_leg_cap() {
         g.assets[asset_index].market_id
     );
 
-    let prices = [100u64; V16_MAX_MARKET_SLOTS_N];
+    let prices = vec![100u64; g.assets.len()];
     g.full_account_refresh(&mut a, &prices).unwrap();
     assert!(a.health_cert.valid);
 }
@@ -3425,6 +3594,31 @@ fn v16_dynamic_header_can_grow_and_activate_appended_market_slot() {
 }
 
 #[test]
+fn v16_dynamic_header_activates_generic_wrapper_slot_without_touching_wrapper_data() {
+    let g = MarketGroupV16::new(
+        ids().0,
+        V16Config::public_user_fund_with_market_slots(4, 4, 0, 10),
+    )
+    .unwrap();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 8).unwrap();
+    header.grow_asset_slot_capacity_not_atomic(8, 8).unwrap();
+    let mut slot = EngineAssetSlotWithExtV16Account {
+        engine: EngineAssetSlotV16Account::default(),
+        ext: [7u8; 32],
+    };
+    let market_id = header.next_market_id.get();
+
+    header
+        .activate_empty_market_slot_not_atomic(7, &mut slot, 777, 2)
+        .unwrap();
+
+    assert_eq!(slot.ext, [7u8; 32]);
+    assert_eq!(slot.engine.asset.market_id.get(), market_id);
+    assert_eq!(slot.engine.asset.effective_price.get(), 777);
+    assert_eq!(slot.engine.backing_long.market_id.get(), market_id);
+}
+
+#[test]
 fn v16_dynamic_header_growth_counter_overflow_rejects_before_metadata_mutation() {
     let g = MarketGroupV16::new(
         ids().0,
@@ -3451,7 +3645,7 @@ fn v16_dynamic_header_growth_counter_overflow_rejects_before_metadata_mutation()
 
 #[test]
 fn v16_dynamic_header_capacity_is_wrapper_supplied_not_fixed_runtime_window() {
-    let capacity = V16_MAX_MARKET_SLOTS_N as u32 + 25;
+    let capacity = 89u32;
     let config = V16Config::public_user_fund_with_market_slots(4, 16, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(ids().0, config, 16, 0).unwrap();
 
@@ -3477,7 +3671,7 @@ fn v16_dynamic_header_capacity_is_wrapper_supplied_not_fixed_runtime_window() {
 
 #[test]
 fn v16_dynamic_realloc_layout_is_capacity_driven_not_fixed_runtime_window() {
-    let capacity = V16_MAX_MARKET_SLOTS_N * 4 + 7;
+    let capacity = 263usize;
     let wrapper_ext_len = 24usize;
     let slot_len = MarketGroupV16HeaderAccount::dynamic_asset_slot_stride(wrapper_ext_len).unwrap();
     let account_len =
@@ -3507,15 +3701,12 @@ fn v16_dynamic_realloc_layout_is_capacity_driven_not_fixed_runtime_window() {
         account_len,
         "last growable slot must end exactly at the reallocated account length"
     );
-    assert!(
-        capacity > V16_MAX_MARKET_SLOTS_N,
-        "test must exercise capacity beyond the fixed proof aggregate"
-    );
+    assert!(capacity > 64, "test must exercise wrapper-sized growth");
 }
 
 #[test]
 fn v16_dynamic_realloc_layout_rejects_truncated_or_misaligned_lengths() {
-    let capacity = V16_MAX_MARKET_SLOTS_N + 3;
+    let capacity = 67usize;
     let wrapper_ext_len = 7usize;
     let account_len =
         MarketGroupV16HeaderAccount::dynamic_market_group_account_len(capacity, wrapper_ext_len)
@@ -3546,14 +3737,13 @@ fn v16_dynamic_realloc_layout_rejects_truncated_or_misaligned_lengths() {
 }
 
 #[test]
-fn v16_fixed_runtime_aggregate_rejects_capacity_above_internal_window() {
-    let config =
-        V16Config::public_user_fund_with_market_slots(4, V16_MAX_MARKET_SLOTS_N as u32 + 1, 0, 10);
+fn v16_runtime_group_accepts_wrapper_sized_market_capacity_without_static_window() {
+    let config = V16Config::public_user_fund_with_market_slots(4, 89, 0, 10);
     assert_eq!(config.validate_public_user_fund_shape(), Ok(()));
-    assert_eq!(
-        MarketGroupV16::new(ids().0, config),
-        Err(V16Error::InvalidConfig)
-    );
+    let g = MarketGroupV16::new(ids().0, config).unwrap();
+    assert_eq!(g.assets.len(), 89);
+    assert_eq!(g.source_credit.len(), 178);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
 }
 
 #[test]
@@ -3792,7 +3982,7 @@ fn v16_recovery_mode_blocks_value_escape_and_fee_sync_before_mutation() {
     g.vault += 10;
     g.full_account_refresh(&mut a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
-    let before = a;
+    let before = a.clone();
     let vault_before = g.vault;
     let c_tot_before = g.c_tot;
     let insurance_before = g.insurance;
@@ -3823,7 +4013,7 @@ fn v16_recovery_mode_rejects_liquidation_and_rebalance_before_account_mutation()
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
-    let account_before = a;
+    let account_before = a.clone();
     let asset_before = g.assets[0];
     let reason = PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability;
     g.declare_permissionless_recovery(reason).unwrap();
@@ -3865,7 +4055,7 @@ fn v16_recovery_mode_rejects_non_recovery_crank_before_account_mutation() {
         PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability,
     )
     .unwrap();
-    let before = a;
+    let before = a.clone();
 
     let res = g.permissionless_crank_not_atomic(
         &mut a,
@@ -3909,7 +4099,7 @@ fn v16_permissionless_crank_recovery_declaration_is_accounting_neutral() {
     let mut a = account();
     g.deposit_not_atomic(&mut a, 100).unwrap();
     g.attach_leg(&mut a, 0, SideV16::Long, 1).unwrap();
-    let account_before = a;
+    let account_before = a.clone();
     let vault_before = g.vault;
     let c_tot_before = g.c_tot;
     let insurance_before = g.insurance;
@@ -4017,12 +4207,12 @@ fn v16_direct_fee_charge_is_live_only_but_resolved_fee_sync_still_works() {
     g.deposit_not_atomic(&mut a, 100).unwrap();
     g.resolve_market_not_atomic(10).unwrap();
 
-    let before = (g, a);
+    let before = (g.clone(), a.clone());
     assert_eq!(
         g.charge_account_fee_not_atomic(&mut a, 10),
         Err(V16Error::LockActive)
     );
-    assert_eq!((g, a), before);
+    assert_eq!((g.clone(), a.clone()), before);
 
     let synced = g
         .sync_account_fee_to_slot_not_atomic(&mut a, 10, 1)
@@ -4273,7 +4463,7 @@ fn v16_pending_domain_loss_barrier_blocks_side_reset_before_residual_done() {
     g.assets[0].a_long = ADL_ONE - 1;
     g.assets[0].epoch_long = 4;
 
-    let before = g;
+    let before = g.clone();
     assert_eq!(
         g.begin_full_drain_reset(0, SideV16::Long),
         Err(V16Error::LockActive),
@@ -4501,9 +4691,9 @@ fn v16_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset() {
     g.attach_leg(&mut long, 1, SideV16::Long, POS_SCALE as i128)
         .unwrap();
     g.assets[1].k_long = -(3 * ADL_ONE as i128);
-    let before_group = g;
-    let before_long = long;
-    let before_short = short;
+    let before_group = g.clone();
+    let before_long = long.clone();
+    let before_short = short.clone();
 
     let res = g.execute_trade_with_fee_not_atomic(
         &mut long,
@@ -4534,9 +4724,9 @@ fn v16_invalid_trade_request_rejects_before_any_mutation() {
     short.provenance_header.portfolio_account_id = [4; 32];
     g.deposit_not_atomic(&mut long, 1_000).unwrap();
     g.deposit_not_atomic(&mut short, 1_000).unwrap();
-    let before_group = g;
-    let before_long = long;
-    let before_short = short;
+    let before_group = g.clone();
+    let before_long = long.clone();
+    let before_short = short.clone();
 
     let res = g.execute_trade_with_fee_not_atomic(
         &mut long,
@@ -4726,8 +4916,8 @@ fn v16_same_epoch_full_refresh_is_idempotent_after_kf_settlement() {
     g.accrue_asset_to_not_atomic(0, 1, 101, 0, true).unwrap();
     g.full_account_refresh(&mut a, &[101; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
-    let account_after_first = a;
-    let group_after_first = g;
+    let account_after_first = a.clone();
+    let group_after_first = g.clone();
 
     g.full_account_refresh(&mut a, &[101; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
@@ -5014,7 +5204,7 @@ fn v16_same_slot_exposed_price_move_rejects_without_mutation() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
-    let before = g;
+    let before = g.clone();
 
     assert_eq!(
         g.accrue_asset_to_not_atomic(0, 0, 2, 0, true),
@@ -5033,7 +5223,7 @@ fn v16_over_cap_exposed_price_move_routes_recovery_without_mutation() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
-    let before = g;
+    let before = g.clone();
 
     assert_eq!(
         g.accrue_asset_to_not_atomic(0, 1, 102, 0, true),
@@ -5084,7 +5274,7 @@ fn v16_loss_stale_blocks_risk_increasing_trade_even_with_no_positive_credit_marg
     g.deposit_not_atomic(&mut short, 10_000).unwrap();
     g.loss_stale_active = true;
 
-    let before = (g, long, short);
+    let before = (g.clone(), long.clone(), short.clone());
     let res = g.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
@@ -5114,7 +5304,7 @@ fn v16_hlock_rejects_risk_increasing_trade_that_needs_positive_pnl_credit() {
     g.vault = 400;
     g.threshold_stress_active = true;
 
-    let before = (g, long, short);
+    let before = (g.clone(), long.clone(), short.clone());
     let res = g.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
@@ -5383,8 +5573,8 @@ fn v16_cure_and_cancel_close_rejects_after_irreversible_progress_without_consumi
         ..CloseProgressLedgerV16::EMPTY
     };
     g.pending_domain_loss_barriers[1] = 1;
-    let before_account = a;
-    let before_group = g;
+    let before_account = a.clone();
+    let before_group = g.clone();
 
     assert_eq!(
         g.cure_and_cancel_close_not_atomic(&mut a, 7, &[100; V16_MAX_PORTFOLIO_ASSETS_N]),
@@ -5515,7 +5705,7 @@ fn v16_single_domain_close_lock_rejects_second_origin_until_first_finalized() {
     );
 
     let before_second_ledger = second_bankrupt.close_progress;
-    let before_barriers = g.pending_domain_loss_barriers;
+    let before_barriers = g.pending_domain_loss_barriers.clone();
     let before_b_short = g.assets[0].b_short_num;
     assert_eq!(
         g.book_bankruptcy_residual_chunk_for_account(&mut second_bankrupt, 0, SideV16::Long, 1),
@@ -5687,7 +5877,7 @@ fn v16_pending_obligation_blocks_side_reset_until_obligation_account_clears() {
     assert_eq!(g.assets[0].oi_eff_short_q, 0);
     assert_eq!(g.assets[0].pending_obligation_count_short, 1);
     g.pending_domain_loss_barriers[1] = 0;
-    let before = g;
+    let before = g.clone();
     assert_eq!(
         g.begin_full_drain_reset(0, SideV16::Short),
         Err(V16Error::LockActive),
@@ -6114,7 +6304,7 @@ fn v16_side_reset_cannot_finalize_until_prior_epoch_positions_clear() {
 fn v16_begin_full_drain_reset_rejects_side_already_reset_pending() {
     let mut g = group();
     g.begin_full_drain_reset(0, SideV16::Long).unwrap();
-    let before = g;
+    let before = g.clone();
 
     assert_eq!(
         g.begin_full_drain_reset(0, SideV16::Long),
@@ -7013,7 +7203,7 @@ fn v16_ordinary_positive_conversion_disabled_after_resolved_payout_lane_exists()
     g.full_account_refresh(&mut a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     g.resolve_market_not_atomic(1).unwrap();
-    let before = (g, a);
+    let before = (g.clone(), a.clone());
 
     let result = g.convert_released_pnl_to_capital_not_atomic(&mut a);
 
@@ -7030,7 +7220,7 @@ fn v16_ordinary_positive_conversion_disabled_after_resolved_payout_lane_exists()
     initialize_payout_ledger(&mut live);
     live.full_account_refresh(&mut live_account, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
-    let before_live = (live, live_account);
+    let before_live = (live.clone(), live_account.clone());
 
     let live_result = live.convert_released_pnl_to_capital_not_atomic(&mut live_account);
 
@@ -7433,8 +7623,8 @@ fn v16_liquidation_rejects_zero_close_before_mutation() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
-    let before_group = g;
-    let before_account = a;
+    let before_group = g.clone();
+    let before_account = a.clone();
 
     let res = g.liquidate_account_not_atomic(
         &mut a,
@@ -7541,7 +7731,7 @@ fn v16_domain_insurance_budget_caps_bankruptcy_spend_for_one_asset_side() {
     let mut opposing = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
     g.vault = 10;
     g.insurance = 10;
-    g.insurance_domain_budget = [0; V16_DOMAIN_COUNT];
+    g.insurance_domain_budget = vec![0; g.insurance_domain_budget.len()];
     let short_domain_for_bankrupt_long = 1;
     g.insurance_domain_budget[short_domain_for_bankrupt_long] = 3;
     a.pnl = -9;
@@ -7614,7 +7804,7 @@ fn v16_liquidation_residual_domain_is_opposite_side_for_long_and_short() {
             PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
         g.vault = 4;
         g.insurance = 4;
-        g.insurance_domain_budget = [0; V16_DOMAIN_COUNT];
+        g.insurance_domain_budget = vec![0; g.insurance_domain_budget.len()];
         let expected_domain = match bankrupt_side {
             SideV16::Long => 1,
             SideV16::Short => 0,
@@ -7665,7 +7855,7 @@ fn v16_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
     let mut opposing = account_with_id(9);
     g.vault = 4;
     g.insurance = 4;
-    g.insurance_domain_budget = [0; V16_DOMAIN_COUNT];
+    g.insurance_domain_budget = vec![0; g.insurance_domain_budget.len()];
     g.insurance_domain_budget[0] = 4;
     bankrupt.pnl = -5;
     g.negative_pnl_account_count = 1;
@@ -7687,7 +7877,10 @@ fn v16_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
     assert_eq!(out.insurance_used, 0);
     assert_eq!(out.residual_booked, 5);
     assert_eq!(g.insurance, 4);
-    assert_eq!(g.insurance_domain_spent, [0; V16_DOMAIN_COUNT]);
+    assert_eq!(
+        g.insurance_domain_spent,
+        vec![0; g.insurance_domain_spent.len()]
+    );
     assert_eq!(
         g.pending_domain_loss_barrier_count(0, SideV16::Short),
         Ok(0)

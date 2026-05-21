@@ -71,7 +71,7 @@ fn apply_fuzz_action(
     selector: u8,
     amount_seed: u16,
 ) {
-    let before = (*group, *a, *b);
+    let before = (group.clone(), a.clone(), b.clone());
     let target_a = (selector & 0x8) == 0;
     let price = 1 + ((amount_seed as u64) & 1);
     let effective_prices = prices(price);
