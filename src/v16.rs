@@ -1201,6 +1201,8 @@ impl<'a> PortfolioV16View<'a> {
         let active_leg_cap = config.max_portfolio_assets as usize;
         let configured_assets = config.max_market_slots as usize;
         let bitmap = self.header.active_bitmap.map(V16PodU64::get);
+        let mut seen_assets = [u32::MAX; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_asset_count = 0usize;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let bit = active_bitmap_get(bitmap, slot);
@@ -1238,14 +1240,15 @@ impl<'a> PortfolioV16View<'a> {
             {
                 return Err(V16Error::HiddenLeg);
             }
-            let mut prev = 0usize;
-            while prev < slot {
-                let prev_leg = self.header.legs[prev].try_to_runtime()?;
-                if prev_leg.active && prev_leg.asset_index == leg.asset_index {
+            let mut seen = 0usize;
+            while seen < seen_asset_count {
+                if seen_assets[seen] == leg.asset_index {
                     return Err(V16Error::HiddenLeg);
                 }
-                prev += 1;
+                seen += 1;
             }
+            seen_assets[seen_asset_count] = leg.asset_index;
+            seen_asset_count += 1;
             slot += 1;
         }
 
@@ -6227,15 +6230,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
         asset_index: usize,
     ) -> V16Result<Option<usize>> {
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
         let mut found = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active && leg.asset_index as usize == asset_index {
-                if found.is_some() {
+            if active_bitmap_get(bitmap, slot) {
+                let leg = account.header.legs[slot].try_to_runtime()?;
+                if !leg.active {
                     return Err(V16Error::HiddenLeg);
                 }
-                found = Some(slot);
+                if leg.asset_index as usize == asset_index {
+                    if found.is_some() {
+                        return Err(V16Error::HiddenLeg);
+                    }
+                    found = Some(slot);
+                }
             }
             slot += 1;
         }
@@ -6885,12 +6894,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )? {
             return Err(V16Error::LockActive);
         }
-        if let Some(existing_slot) =
-            Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?
-        {
+        let existing_slot = Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        if let Some(existing_slot) = existing_slot {
             self.settle_leg_kf_effects_at_slot(account, existing_slot)?;
         }
-        let current = signed_position(Self::active_leg_for_asset(&account.as_view(), asset_index)?);
+        let current_leg = if let Some(existing_slot) = existing_slot {
+            account.header.legs[existing_slot].try_to_runtime()?
+        } else {
+            PortfolioLegV16::EMPTY
+        };
+        let current = signed_position(current_leg);
         let new = current
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -6903,9 +6916,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             };
             return self.attach_leg(account, asset_index, side, new);
         }
-        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let leg_slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
         if new == 0 {
-            let leg = account.header.legs[leg_slot].try_to_runtime()?;
+            let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
                 let old_abs = leg.basis_pos_q.unsigned_abs();
                 let mut asset = self.asset_state(asset_index)?;
@@ -7939,13 +7952,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             price,
         )?;
 
+        let long_has_source_claims = Self::account_has_source_claims(&long_account.as_view())?;
+        let short_has_source_claims = Self::account_has_source_claims(&short_account.as_view())?;
         if risk_increasing && !locked {
-            if Self::account_has_source_claims(&long_account.as_view())?
+            if long_has_source_claims
                 && Self::ensure_no_positive_credit_initial_margin(&long_account.as_view()).is_err()
             {
                 return Err(V16Error::LockActive);
             }
-            if Self::account_has_source_claims(&short_account.as_view())?
+            if short_has_source_claims
                 && Self::ensure_no_positive_credit_initial_margin(&short_account.as_view()).is_err()
             {
                 return Err(V16Error::LockActive);
