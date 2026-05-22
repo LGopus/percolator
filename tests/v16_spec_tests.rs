@@ -567,6 +567,62 @@ fn v16_zero_copy_trade_updates_positions_like_runtime_without_vecs() {
         runtime_short.legs[0]
     );
     assert_eq!(
+        long_view.header.health_cert.try_to_runtime().unwrap(),
+        runtime_long.health_cert
+    );
+    assert_eq!(
+        short_view.header.health_cert.try_to_runtime().unwrap(),
+        runtime_short.health_cert
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .oi_eff_long_q,
+        runtime_g.assets[0].oi_eff_long_q
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .oi_eff_short_q,
+        runtime_g.assets[0].oi_eff_short_q
+    );
+
+    let second_expected = runtime_g
+        .execute_trade_with_fee_in_place_not_atomic(
+            &mut runtime_long,
+            &mut runtime_short,
+            request,
+            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+    let second_outcome = market_view
+        .execute_trade_with_fee_in_place_not_atomic(&mut long_view, &mut short_view, request)
+        .unwrap();
+
+    assert_eq!(second_outcome, second_expected);
+    assert_eq!(
+        long_view.header.legs[0].try_to_runtime().unwrap(),
+        runtime_long.legs[0]
+    );
+    assert_eq!(
+        short_view.header.legs[0].try_to_runtime().unwrap(),
+        runtime_short.legs[0]
+    );
+    assert_eq!(
+        long_view.header.health_cert.try_to_runtime().unwrap(),
+        runtime_long.health_cert
+    );
+    assert_eq!(
+        short_view.header.health_cert.try_to_runtime().unwrap(),
+        runtime_short.health_cert
+    );
+    assert_eq!(
         market_view.markets[0]
             .engine
             .asset

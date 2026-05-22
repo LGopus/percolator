@@ -7752,6 +7752,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<HealthCertV16> {
+        account.validate_with_market(&self.as_view())?;
+        if !decode_bool(account.header.stale_state)?
+            && !decode_bool(account.header.b_stale_state)?
+            && !Self::has_b_stale_leg(&account.as_view())?
+            && self
+                .ensure_favorable_action_current_certificate(&account.as_view())
+                .is_ok()
+        {
+            return account.header.health_cert.try_to_runtime();
+        }
         self.full_account_refresh_not_atomic(account)?;
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
         let cert = self.compute_account_health_cert(&account.as_view(), true)?;
@@ -7793,6 +7803,84 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn recertify_account_after_trade_delta(
+        &self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        old_abs_q: u128,
+        price: u64,
+    ) -> V16Result<HealthCertV16> {
+        if asset_index >= self.header.config.max_market_slots.get() as usize
+            || price == 0
+            || price > MAX_ORACLE_PRICE
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let existing = account.header.health_cert.try_to_runtime()?;
+        let new_abs_q =
+            signed_position(Self::active_leg_for_asset(&account.as_view(), asset_index)?)
+                .unsigned_abs();
+        let old_notional = risk_notional_ceil(old_abs_q, price)?;
+        let new_notional = risk_notional_ceil(new_abs_q, price)?;
+        let config = self.header.config.try_to_runtime()?;
+        let old_initial = margin_requirement(
+            old_notional,
+            config.initial_margin_bps,
+            config.min_nonzero_im_req,
+        )?;
+        let old_maintenance = margin_requirement(
+            old_notional,
+            config.maintenance_margin_bps,
+            config.min_nonzero_mm_req,
+        )?;
+        let new_initial = margin_requirement(
+            new_notional,
+            config.initial_margin_bps,
+            config.min_nonzero_im_req,
+        )?;
+        let new_maintenance = margin_requirement(
+            new_notional,
+            config.maintenance_margin_bps,
+            config.min_nonzero_mm_req,
+        )?;
+        let initial_req = existing
+            .certified_initial_req
+            .checked_sub(old_initial)
+            .and_then(|v| v.checked_add(new_initial))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let maintenance_req = existing
+            .certified_maintenance_req
+            .checked_sub(old_maintenance)
+            .and_then(|v| v.checked_add(new_maintenance))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let worst_case_loss = existing
+            .certified_worst_case_loss
+            .checked_sub(old_notional)
+            .and_then(|v| v.checked_add(new_notional))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let equity = self.account_haircut_equity(&account.as_view())?;
+        let certified_liq_deficit = if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            maintenance_req.saturating_sub(equity as u128)
+        };
+        let cert = HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: initial_req,
+            certified_maintenance_req: maintenance_req,
+            certified_liq_deficit,
+            certified_worst_case_loss: worst_case_loss,
+            cert_oracle_epoch: self.header.oracle_epoch.get(),
+            cert_funding_epoch: self.header.funding_epoch.get(),
+            cert_risk_epoch: self.header.risk_epoch.get(),
+            cert_asset_set_epoch: self.header.asset_set_epoch.get(),
+            active_bitmap_at_cert: account.header.active_bitmap.map(V16PodU64::get),
+            valid: true,
+        };
+        account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        Ok(cert)
+    }
+
     pub fn execute_trade_with_fee_in_place_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
@@ -7823,15 +7911,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
+        let price = self.asset_state(request.asset_index)?.effective_price;
+        let long_old_abs = signed_position(Self::active_leg_for_asset(
+            &long_account.as_view(),
+            request.asset_index,
+        )?)
+        .unsigned_abs();
+        let short_old_abs = signed_position(Self::active_leg_for_asset(
+            &short_account.as_view(),
+            request.asset_index,
+        )?)
+        .unsigned_abs();
         self.charge_account_fee_current_not_atomic(long_account, fee)?;
         self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
         self.apply_position_delta(short_account, request.asset_index, short_delta)?;
-
-        let long_cert = self.compute_account_health_cert(&long_account.as_view(), true)?;
-        long_account.header.health_cert = HealthCertV16Account::from_runtime(&long_cert);
-        let short_cert = self.compute_account_health_cert(&short_account.as_view(), true)?;
-        short_account.header.health_cert = HealthCertV16Account::from_runtime(&short_cert);
+        self.recertify_account_after_trade_delta(
+            long_account,
+            request.asset_index,
+            long_old_abs,
+            price,
+        )?;
+        self.recertify_account_after_trade_delta(
+            short_account,
+            request.asset_index,
+            short_old_abs,
+            price,
+        )?;
 
         if risk_increasing && !locked {
             if Self::account_has_source_claims(&long_account.as_view())?
