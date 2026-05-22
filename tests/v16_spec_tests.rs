@@ -1,14 +1,15 @@
 use percolator::v16::{
-    account_equity, risk_notional_ceil, AssetLifecycleV16, AssetStateV16Account,
-    BackingBucketStatusV16, CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16Account, LiquidationRequestV16, Market, MarketGroupV16,
-    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, MarketModeV16,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, RebalanceRequestV16, ReservationEncumbranceProofV16,
-    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
-    SideV16, SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
+    account_equity, risk_notional_ceil, v16_domain_count_for_market_slots, AssetLifecycleV16,
+    AssetStateV16Account, BackingBucketStatusV16, CloseProgressLedgerV16,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account, LiquidationRequestV16, Market,
+    MarketGroupV16, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account,
+    PortfolioSourceDomainV16Account, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
+    RebalanceRequestV16, ReservationEncumbranceProofV16, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16,
+    SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
     TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64,
     V16_MAX_PORTFOLIO_ASSETS_N,
@@ -1589,6 +1590,11 @@ fn v16_zero_copy_source_credit_lien_lifecycles_without_runtime_vecs() {
     market_view
         .create_source_credit_lien_from_counterparty_not_atomic(0, 30)
         .unwrap();
+    assert!(market_view
+        .reservation_encumbrance_proof_for_domain(0)
+        .unwrap()
+        .validate()
+        .is_ok());
     assert_eq!(market_view.source_credit_available_backing_num(0), Ok(70));
     market_view
         .release_source_credit_lien_from_counterparty_not_atomic(0, 30)
@@ -1678,6 +1684,41 @@ fn v16_zero_copy_source_credit_lien_lifecycles_without_runtime_vecs() {
     assert_eq!(market_view.markets[0].wrapper, preserved_long_wrapper);
     assert_eq!(market_view.markets[0].wrapper, preserved_short_wrapper);
     market_view.validate_shape().unwrap();
+
+    let mut account = account_with_id(44);
+    account.ensure_source_domain_capacity(
+        v16_domain_count_for_market_slots(market_view.header.config.max_market_slots.get())
+            .unwrap(),
+    );
+    account.source_claim_market_id[0] = market_view.markets[0].engine.asset.market_id.get();
+    account.source_claim_bound_num[0] = 4 * BOUND_SCALE;
+    account.source_claim_liened_num[0] = 4 * BOUND_SCALE;
+    account.source_claim_counterparty_liened_num[0] = 4 * BOUND_SCALE;
+    account.source_lien_effective_reserved[0] = 4;
+    account.source_lien_counterparty_backing_num[0] = 4 * BOUND_SCALE;
+    let account_header = PortfolioAccountV16Account::from_runtime(&account);
+    let account_sources = PortfolioAccountV16Account::source_domains_from_runtime(&account)
+        .expect("runtime account should serialize to zero-copy domains");
+    let account_view = percolator::v16::PortfolioV16View::new(&account_header, &account_sources);
+    let proof = market_view
+        .source_credit_lien_proof_for_account_domain(&account_view, 0)
+        .unwrap();
+    assert_eq!(
+        proof,
+        SourceCreditLienAggregateProofV16 {
+            domain: 0,
+            source_claim_bound_num: 4 * BOUND_SCALE,
+            face_claim_locked_num: 4 * BOUND_SCALE,
+            counterparty_face_claim_locked_num: 4 * BOUND_SCALE,
+            insurance_face_claim_locked_num: 0,
+            effective_credit_reserved: 4,
+            counterparty_backing_reserved_num: 4 * BOUND_SCALE,
+            insurance_backing_reserved_num: 0,
+            impaired_face_claim_num: 0,
+            impaired_effective_credit_reserved: 0,
+        }
+    );
+    assert!(proof.validate().is_ok());
 }
 
 #[test]

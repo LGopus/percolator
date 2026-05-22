@@ -4264,7 +4264,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
-    fn reservation_encumbrance_proof_for_domain(
+    pub fn reservation_encumbrance_proof_for_domain(
         &self,
         domain: usize,
     ) -> V16Result<ReservationEncumbranceProofV16> {
@@ -4291,6 +4291,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source_impaired_liened_insurance_num: source.impaired_liened_insurance_num,
             reservation_impaired_liened_insurance_num: reservation.impaired_liened_insurance_num,
             source_credit_rate_num: source.credit_rate_num,
+        })
+    }
+
+    pub fn source_credit_lien_proof_for_account_domain(
+        &self,
+        account: &PortfolioV16View<'_>,
+        domain: usize,
+    ) -> V16Result<SourceCreditLienAggregateProofV16> {
+        self.domain_asset_side(domain)?;
+        let source = account
+            .source_domains
+            .get(domain)
+            .ok_or(V16Error::InvalidLeg)?;
+        Ok(SourceCreditLienAggregateProofV16 {
+            domain: u16::try_from(domain).map_err(|_| V16Error::ArithmeticOverflow)?,
+            source_claim_bound_num: source.source_claim_bound_num.get(),
+            face_claim_locked_num: source.source_claim_liened_num.get(),
+            counterparty_face_claim_locked_num: source.source_claim_counterparty_liened_num.get(),
+            insurance_face_claim_locked_num: source.source_claim_insurance_liened_num.get(),
+            effective_credit_reserved: source.source_lien_effective_reserved.get(),
+            counterparty_backing_reserved_num: source.source_lien_counterparty_backing_num.get(),
+            insurance_backing_reserved_num: source.source_lien_insurance_backing_num.get(),
+            impaired_face_claim_num: source.source_claim_impaired_num.get(),
+            impaired_effective_credit_reserved: source
+                .source_lien_impaired_effective_reserved
+                .get(),
         })
     }
 
