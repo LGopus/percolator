@@ -1564,6 +1564,123 @@ fn v16_zero_copy_source_backing_lifecycle_without_runtime_vecs() {
 }
 
 #[test]
+fn v16_zero_copy_source_credit_lien_lifecycles_without_runtime_vecs() {
+    let mut g = group();
+    g.vault = 100;
+    g.insurance = 100;
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let preserved_long_wrapper = markets[0].wrapper;
+    let preserved_short_wrapper = markets[0].wrapper;
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market_view
+        .add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    market_view
+        .add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    market_view
+        .create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    assert_eq!(market_view.source_credit_available_backing_num(0), Ok(70));
+    market_view
+        .release_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    assert_eq!(market_view.source_credit_available_backing_num(0), Ok(100));
+    market_view
+        .create_source_credit_lien_from_counterparty_not_atomic(0, 20)
+        .unwrap();
+    market_view
+        .consume_source_credit_lien_from_counterparty_not_atomic(0, 20)
+        .unwrap();
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .spent_backing_num
+            .get(),
+        20
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .backing_long
+            .consumed_liened_backing_num
+            .get(),
+        20
+    );
+    market_view
+        .create_source_credit_lien_from_counterparty_not_atomic(0, 10)
+        .unwrap();
+    market_view
+        .impair_source_credit_lien_from_counterparty_not_atomic(0, 10)
+        .unwrap();
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .impaired_liened_backing_num
+            .get(),
+        10
+    );
+
+    market_view
+        .add_source_positive_claim_bound_not_atomic(1, 50 * BOUND_SCALE, 50 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .reserve_insurance_credit_not_atomic(1, 50 * BOUND_SCALE)
+        .unwrap();
+    assert_eq!(
+        market_view.source_credit_available_backing_num(1),
+        Ok(50 * BOUND_SCALE)
+    );
+    market_view
+        .create_source_credit_lien_from_insurance_not_atomic(1, 20 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .release_source_credit_lien_from_insurance_not_atomic(1, 20 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .create_source_credit_lien_from_insurance_not_atomic(1, 10 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .consume_source_credit_lien_from_insurance_not_atomic(1, 10 * BOUND_SCALE)
+        .unwrap();
+    assert_eq!(market_view.header.insurance.get(), 90);
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .insurance_domain_spent_short
+            .get(),
+        10
+    );
+    market_view
+        .create_source_credit_lien_from_insurance_not_atomic(1, 5 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .impair_source_credit_lien_from_insurance_not_atomic(1, 5 * BOUND_SCALE)
+        .unwrap();
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_short
+            .impaired_liened_insurance_num
+            .get(),
+        5 * BOUND_SCALE
+    );
+    assert_eq!(market_view.markets[0].wrapper, preserved_long_wrapper);
+    assert_eq!(market_view.markets[0].wrapper, preserved_short_wrapper);
+    market_view.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_withdraw_that_uses_positive_credit_creates_source_lien() {
     let (market, _, _) = ids();
     let mut cfg = V16Config::public_user_fund(1, 0, 10);

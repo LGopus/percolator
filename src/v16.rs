@@ -4420,6 +4420,374 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
+    pub fn create_source_credit_lien_from_counterparty_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (bucket, source) = MarketGroupV16::prepare_counterparty_lien_create_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            self.header.current_slot.get(),
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    pub fn release_source_credit_lien_from_counterparty_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (bucket, source) = MarketGroupV16::prepare_counterparty_lien_release_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            self.header.current_slot.get(),
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    fn consume_source_credit_lien_from_counterparty_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (bucket, source) = MarketGroupV16::prepare_counterparty_lien_consume_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        Ok(())
+    }
+
+    pub fn consume_source_credit_lien_from_counterparty_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.consume_source_credit_lien_from_counterparty_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    fn impair_source_credit_lien_from_counterparty_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (bucket, source) = MarketGroupV16::prepare_counterparty_lien_impair_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        Ok(())
+    }
+
+    pub fn impair_source_credit_lien_from_counterparty_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.impair_source_credit_lien_from_counterparty_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    pub fn reserve_insurance_credit_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let current_reservation = self.insurance_reservation_for_domain(domain)?;
+        let new_reserved = current_reservation
+            .insurance_credit_reserved_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let configured_domains = self.configured_domain_count()?;
+        let mut live_source_credit_insurance_atoms = 0u128;
+        let mut d = 0usize;
+        while d < configured_domains {
+            let reserved_num = if d == domain {
+                new_reserved
+            } else {
+                self.insurance_reservation_for_domain(d)?
+                    .insurance_credit_reserved_num
+            };
+            let reserved_atoms = MarketGroupV16::amount_from_bound_num(reserved_num)?;
+            live_source_credit_insurance_atoms = live_source_credit_insurance_atoms
+                .checked_add(reserved_atoms)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        let domain_reserved_atoms = MarketGroupV16::amount_from_bound_num(new_reserved)?;
+        let (budget, spent) = self.domain_insurance_budget_spent(domain)?;
+        if live_source_credit_insurance_atoms > self.header.insurance.get()
+            || spent
+                .checked_add(domain_reserved_atoms)
+                .ok_or(V16Error::ArithmeticOverflow)?
+                > budget
+        {
+            return Err(V16Error::LockActive);
+        }
+        let mut reservation = current_reservation;
+        let mut source = self.source_credit_for_domain(domain)?;
+        reservation.insurance_credit_reserved_num = new_reserved;
+        reservation.source_credit_epoch = source.credit_epoch;
+        source.insurance_credit_reserved_num = source
+            .insurance_credit_reserved_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.backing_bucket_for_domain(domain)?,
+            reservation,
+        )?
+        .validate()?;
+        self.set_insurance_reservation_for_domain(domain, reservation)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    pub fn create_source_credit_lien_from_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (reservation, source) = MarketGroupV16::prepare_insurance_lien_create_delta(
+            self.insurance_reservation_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.backing_bucket_for_domain(domain)?,
+            reservation,
+        )?
+        .validate()?;
+        self.set_insurance_reservation_for_domain(domain, reservation)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    pub fn release_source_credit_lien_from_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (reservation, source) = MarketGroupV16::prepare_insurance_lien_release_delta(
+            self.insurance_reservation_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.backing_bucket_for_domain(domain)?,
+            reservation,
+        )?
+        .validate()?;
+        self.set_insurance_reservation_for_domain(domain, reservation)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    pub fn consume_source_credit_lien_from_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (reservation, source, next_domain_spent, next_insurance) =
+            MarketGroupV16::prepare_insurance_lien_consume_delta(
+                self.insurance_reservation_for_domain(domain)?,
+                self.source_credit_for_domain(domain)?,
+                self.domain_insurance_budget_spent(domain)?.1,
+                self.header.insurance.get(),
+                amount,
+            )?;
+        let spend_atoms = self
+            .header
+            .insurance
+            .get()
+            .checked_sub(next_insurance)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let vault_before = self.header.vault.get();
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        TokenValueFlowProofV16::validate_insurance_to_close_insurance_spent(
+            spend_atoms,
+            vault_before,
+            self.header.vault.get(),
+        )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.backing_bucket_for_domain(domain)?,
+            reservation,
+        )?
+        .validate()?;
+        self.set_insurance_reservation_for_domain(domain, reservation)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.insurance = V16PodU128::new(next_insurance);
+        self.set_domain_insurance_spent(domain, next_domain_spent)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    fn impair_source_credit_lien_from_insurance_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (reservation, source) = MarketGroupV16::prepare_insurance_lien_impair_delta(
+            self.insurance_reservation_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) =
+            MarketGroupV16::prepare_source_credit_domain_recompute_for_epoch(
+                source,
+                self.header.risk_epoch.get(),
+            )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            self.backing_bucket_for_domain(domain)?,
+            reservation,
+        )?
+        .validate()?;
+        self.set_insurance_reservation_for_domain(domain, reservation)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        Ok(())
+    }
+
+    pub fn impair_source_credit_lien_from_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.impair_source_credit_lien_from_insurance_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
     pub fn withdraw_backing_provider_earnings_not_atomic(
         &mut self,
         domain: usize,
