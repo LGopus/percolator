@@ -5,6 +5,7 @@ cd /home/anatoly/percolator
 
 OUTFILE="/home/anatoly/percolator/kani_audit_full.tsv"
 FINAL_OUTFILE="/home/anatoly/percolator/kani_audit_final.tsv"
+KANI_CARGO_FLAGS=${KANI_CARGO_FLAGS:---features fuzz}
 AUDIT_DATE=$(date +%F)
 echo -e "proof\ttime_s\tstatus" > "$OUTFILE"
 
@@ -42,7 +43,7 @@ for proof in "${PROOFS[@]}"; do
     START=$(date +%s)
     LOGFILE=$(mktemp)
 
-    if timeout 600 cargo kani --tests --exact --harness "$proof" --output-format terse > "$LOGFILE" 2>&1; then
+    if timeout 600 cargo kani --tests $KANI_CARGO_FLAGS --exact --harness "$proof" --output-format terse > "$LOGFILE" 2>&1; then
         STATUS="PASS"
         PASS=$((PASS + 1))
     else

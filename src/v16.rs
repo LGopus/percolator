@@ -2521,6 +2521,13 @@ pub struct TradeOutcomeV16 {
     pub notional: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TradePositionPreflightV16 {
+    risk_increasing: bool,
+    long_old_abs_q: u128,
+    short_old_abs_q: u128,
+}
+
 pub const V16_TOKEN_VALUE_CLASS_COUNT: usize = 17;
 
 #[repr(u8)]
@@ -4695,6 +4702,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         #[cfg(feature = "audit-scan")]
         {
             self.validate_shape()
+        }
+        #[cfg(not(feature = "audit-scan"))]
+        {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn validate_account_audit_scan(&self, _account: &PortfolioV16View<'_>) -> V16Result<()> {
+        #[cfg(feature = "audit-scan")]
+        {
+            _account.validate_with_market(&self.as_view())
         }
         #[cfg(not(feature = "audit-scan"))]
         {
@@ -6879,7 +6898,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let cert = self.compute_account_health_cert(&account.as_view(), false)?;
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(cert)
     }
@@ -6945,7 +6964,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             d += 1;
         }
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(total_charged)
     }
@@ -7008,7 +7027,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
     ) -> V16Result<()> {
-        account.validate_with_market(&self.as_view())?;
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
         leg.b_stale = true;
@@ -7124,7 +7142,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.clear_account_b_stale(account)?;
         }
         account.header.health_cert.valid = 0;
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_audit_scan(&account.as_view())?;
         Ok(chunk)
     }
 
@@ -7655,7 +7673,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn account_has_target_effective_lag(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
-        account.validate_with_market(&self.as_view())?;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -7748,20 +7765,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(false)
     }
 
-    fn position_delta_touches_pending_domain_loss_barrier(
+    fn position_change_touches_pending_domain_loss_barrier(
         &self,
-        account: &PortfolioV16View<'_>,
         asset_index: usize,
-        delta_q: i128,
+        current: i128,
+        next: i128,
     ) -> V16Result<bool> {
-        if delta_q == 0 {
-            return Ok(false);
-        }
-        let current = signed_position(Self::active_leg_for_asset(account, asset_index)?);
-        let next = current
-            .checked_add(delta_q)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        validate_basis_or_zero(next)?;
         if current != 0 {
             let current_side = if current > 0 {
                 SideV16::Long
@@ -7785,23 +7794,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(false)
     }
 
-    fn position_delta_blocked_by_pending_domain_loss_barrier(
+    fn position_delta_touches_pending_domain_loss_barrier(
         &self,
         account: &PortfolioV16View<'_>,
         asset_index: usize,
         delta_q: i128,
     ) -> V16Result<bool> {
-        if !self.position_delta_touches_pending_domain_loss_barrier(
-            account,
-            asset_index,
-            delta_q,
-        )? {
+        if delta_q == 0 {
             return Ok(false);
         }
         let current = signed_position(Self::active_leg_for_asset(account, asset_index)?);
         let next = current
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        validate_basis_or_zero(next)?;
+        self.position_change_touches_pending_domain_loss_barrier(asset_index, current, next)
+    }
+
+    fn position_delta_blocked_by_pending_domain_loss_barrier(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+        delta_q: i128,
+    ) -> V16Result<bool> {
+        let current = signed_position(Self::active_leg_for_asset(account, asset_index)?);
+        let next = current
+            .checked_add(delta_q)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        validate_basis_or_zero(next)?;
+        if !self.position_change_touches_pending_domain_loss_barrier(asset_index, current, next)? {
+            return Ok(false);
+        }
         Ok(!same_side_risk_reduction_or_flat_obligation(current, next))
     }
 
@@ -7858,30 +7881,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn validate_trade_position_change_locks(
+    fn validate_trade_position_preflight(
         &self,
         long_account: &PortfolioV16View<'_>,
         short_account: &PortfolioV16View<'_>,
         request: TradeRequestV16,
-    ) -> V16Result<bool> {
+    ) -> V16Result<TradePositionPreflightV16> {
         let long_delta =
             i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
         let short_delta = long_delta
             .checked_neg()
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let risk_increasing =
-            self.trade_delta_risk_increasing(long_account, short_account, request)?;
+        let long_current =
+            signed_position(Self::active_leg_for_asset(long_account, request.asset_index)?);
+        let short_current =
+            signed_position(Self::active_leg_for_asset(short_account, request.asset_index)?);
+        let long_next = long_current
+            .checked_add(long_delta)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let short_next = short_current
+            .checked_add(short_delta)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        validate_basis_or_zero(long_next)?;
+        validate_basis_or_zero(short_next)?;
+        let risk_increasing = position_delta_increases_risk(long_current, long_delta)?
+            || position_delta_increases_risk(short_current, short_delta)?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let touches_pending_domain_barrier =
-            self.position_delta_blocked_by_pending_domain_loss_barrier(
-                long_account,
+            (self.position_change_touches_pending_domain_loss_barrier(
                 request.asset_index,
-                long_delta,
-            )? || self.position_delta_blocked_by_pending_domain_loss_barrier(
-                short_account,
-                request.asset_index,
-                short_delta,
-            )?;
+                long_current,
+                long_next,
+            )? && !same_side_risk_reduction_or_flat_obligation(long_current, long_next))
+                || (self.position_change_touches_pending_domain_loss_barrier(
+                    request.asset_index,
+                    short_current,
+                    short_next,
+                )? && !same_side_risk_reduction_or_flat_obligation(short_current, short_next));
         if touches_pending_domain_barrier {
             return Err(V16Error::LockActive);
         }
@@ -7889,33 +7925,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
-        Ok(risk_increasing)
-    }
-
-    fn trade_delta_risk_increasing(
-        &self,
-        long_account: &PortfolioV16View<'_>,
-        short_account: &PortfolioV16View<'_>,
-        request: TradeRequestV16,
-    ) -> V16Result<bool> {
-        let long_delta =
-            i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let short_delta = long_delta
-            .checked_neg()
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        Ok(position_delta_increases_risk(
-            signed_position(Self::active_leg_for_asset(
-                long_account,
-                request.asset_index,
-            )?),
-            long_delta,
-        )? || position_delta_increases_risk(
-            signed_position(Self::active_leg_for_asset(
-                short_account,
-                request.asset_index,
-            )?),
-            short_delta,
-        )?)
+        Ok(TradePositionPreflightV16 {
+            risk_increasing,
+            long_old_abs_q: long_current.unsigned_abs(),
+            short_old_abs_q: short_current.unsigned_abs(),
+        })
     }
 
     fn attach_leg(
@@ -8138,13 +8152,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if delta_q == 0 {
             return Ok(());
         }
-        if self.position_delta_blocked_by_pending_domain_loss_barrier(
-            &account.as_view(),
-            asset_index,
-            delta_q,
-        )? {
-            return Err(V16Error::LockActive);
-        }
         let existing_slot = Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?;
         if let Some(existing_slot) = existing_slot {
             self.settle_leg_kf_effects_at_slot(account, existing_slot)?;
@@ -8159,6 +8166,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
         validate_basis_or_zero(new)?;
+        if self.position_change_touches_pending_domain_loss_barrier(
+            asset_index,
+            current,
+            new,
+        )? && !same_side_risk_reduction_or_flat_obligation(current, new)
+        {
+            return Err(V16Error::LockActive);
+        }
         if current == 0 {
             let side = if new > 0 {
                 SideV16::Long
@@ -8314,7 +8329,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             count.checked_add(1).ok_or(V16Error::CounterOverflow)?,
         )?;
         self.domain_asset_side(domain)?;
-        account.validate_with_market(&self.as_view())
+        self.validate_account_audit_scan(&account.as_view())
     }
 
     fn ensure_close_progress_not_expired(
@@ -9152,7 +9167,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
         self.validate_shape_audit_scan()?;
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_audit_scan(&account.as_view())?;
         Ok(LiquidationOutcomeV16 {
             closed_q: close_q,
             insurance_used,
@@ -9209,7 +9224,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
         self.validate_shape_audit_scan()?;
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_audit_scan(&account.as_view())?;
         Ok(RebalanceOutcomeV16 {
             reduced_q: reduce_q,
         })
@@ -9368,27 +9383,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let locked = self.h_lock_lane(Some(&long_account.as_view()), false)? == HLockLaneV16::HMax
             || self.h_lock_lane(Some(&short_account.as_view()), false)? == HLockLaneV16::HMax;
-        let risk_increasing = self.validate_trade_position_change_locks(
+        let trade_preflight = self.validate_trade_position_preflight(
             &long_account.as_view(),
             &short_account.as_view(),
             request,
         )?;
+        let risk_increasing = trade_preflight.risk_increasing;
         if risk_increasing {
             self.require_asset_active_for_risk_increase(request.asset_index)?;
         }
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
         let price = self.asset_state(request.asset_index)?.effective_price;
-        let long_old_abs = signed_position(Self::active_leg_for_asset(
-            &long_account.as_view(),
-            request.asset_index,
-        )?)
-        .unsigned_abs();
-        let short_old_abs = signed_position(Self::active_leg_for_asset(
-            &short_account.as_view(),
-            request.asset_index,
-        )?)
-        .unsigned_abs();
         self.charge_account_fee_current_not_atomic(long_account, fee)?;
         self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
@@ -9396,13 +9402,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.recertify_account_after_trade_delta(
             long_account,
             request.asset_index,
-            long_old_abs,
+            trade_preflight.long_old_abs_q,
             price,
         )?;
         self.recertify_account_after_trade_delta(
             short_account,
             request.asset_index,
-            short_old_abs,
+            trade_preflight.short_old_abs_q,
             price,
         )?;
 
@@ -9427,8 +9433,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
         }
         self.validate_shape_audit_scan()?;
-        long_account.validate_with_market(&self.as_view())?;
-        short_account.validate_with_market(&self.as_view())?;
+        self.validate_account_audit_scan(&long_account.as_view())?;
+        self.validate_account_audit_scan(&short_account.as_view())?;
         Ok(TradeOutcomeV16 {
             fee_a: fee,
             fee_b: fee,
@@ -9579,8 +9585,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let paid = account.header.capital.get().min(loss);
         if paid == 0 {
             self.header.bankruptcy_hlock_active = 1;
-            self.validate_shape()?;
-            account.validate_with_market(&self.as_view())?;
+            self.validate_shape_audit_scan()?;
+            self.validate_account_audit_scan(&account.as_view())?;
             return Ok(0);
         }
 
@@ -9614,8 +9620,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         account.header.health_cert.valid = 0;
-        account.validate_with_market(&self.as_view())?;
-        self.validate_shape()?;
+        self.validate_account_audit_scan(&account.as_view())?;
+        self.validate_shape_audit_scan()?;
         Ok(paid)
     }
 
@@ -9678,7 +9684,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
-        self.validate_shape()?;
+        self.validate_shape_audit_scan()?;
         Ok(charged)
     }
 
