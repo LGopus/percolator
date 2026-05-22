@@ -2538,6 +2538,12 @@ struct PositionDeltaLookupV16 {
     next_q: i128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountRefreshCertOutcomeV16 {
+    Certified(HealthCertV16),
+    BChunk(AccountBSettlementChunkV16),
+}
+
 pub const V16_TOKEN_VALUE_CLASS_COUNT: usize = 17;
 
 #[repr(u8)]
@@ -6766,41 +6772,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn reject_if_leg_b_target_advanced(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        leg_slot: usize,
-    ) -> V16Result<()> {
-        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
-            return Err(V16Error::InvalidLeg);
-        }
-        let leg = account.header.legs[leg_slot].try_to_runtime()?;
-        if !leg.active {
-            return Ok(());
-        }
-        let asset_index = leg.asset_index as usize;
-        if self.b_target_for_leg(asset_index, leg)? > leg.b_snap {
-            if !leg.b_stale {
-                let mut stale_leg = leg;
-                stale_leg.b_stale = true;
-                account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&stale_leg);
-            }
-            if !decode_bool(account.header.b_stale_state)? {
-                account.header.b_stale_state = 1;
-                account.header.health_cert.valid = 0;
-                self.header.b_stale_account_count = V16PodU64::new(
-                    self.header
-                        .b_stale_account_count
-                        .get()
-                        .checked_add(1)
-                        .ok_or(V16Error::CounterOverflow)?,
-                );
-            }
-            return Err(V16Error::BStale);
-        }
-        Ok(())
-    }
-
     fn clear_account_stale(&mut self, account: &mut PortfolioV16ViewMut<'_>) -> V16Result<()> {
         if decode_bool(account.header.stale_state)? {
             account.header.stale_state = 0;
@@ -6813,14 +6784,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             );
         }
         Ok(())
-    }
-
-    fn compute_account_health_cert(
-        &self,
-        account: &PortfolioV16View<'_>,
-        require_b_current: bool,
-    ) -> V16Result<HealthCertV16> {
-        self.compute_account_health_cert_with_price_override(account, require_b_current, None)
     }
 
     fn compute_account_health_cert_with_price_override(
@@ -6897,28 +6860,124 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<HealthCertV16> {
+        match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
+            AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
+            AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
+        }
+    }
+
+    fn refresh_account_and_certify_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        price_override: Option<(usize, u64)>,
+        b_delta_budget: u128,
+        allow_b_chunk: bool,
+    ) -> V16Result<AccountRefreshCertOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
-        if decode_bool(account.header.b_stale_state)? {
+        if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
+        let config = self.header.config.try_to_runtime()?;
+        let mut initial_req = 0u128;
+        let mut maintenance_req = 0u128;
+        let mut worst_case_loss = 0u128;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active {
-                self.settle_leg_kf_effects_at_slot(account, slot)?;
-                self.reject_if_leg_b_target_advanced(account, slot)?;
+            if !leg.active {
+                slot += 1;
+                continue;
             }
+            let asset_index = leg.asset_index as usize;
+            self.settle_leg_kf_effects_at_slot(account, slot)?;
+            let mut refreshed = account.header.legs[slot].try_to_runtime()?;
+            let target = self.b_target_for_leg(asset_index, refreshed)?;
+            if target > refreshed.b_snap {
+                self.mark_leg_b_stale(account, asset_index)?;
+                if allow_b_chunk {
+                    let chunk =
+                        self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
+                    if chunk.remaining_after != 0 {
+                        return Ok(AccountRefreshCertOutcomeV16::BChunk(chunk));
+                    }
+                    refreshed = account.header.legs[slot].try_to_runtime()?;
+                } else {
+                    return Err(V16Error::BStale);
+                }
+            }
+            if refreshed.b_stale {
+                if allow_b_chunk {
+                    return Ok(AccountRefreshCertOutcomeV16::BChunk(
+                        AccountBSettlementChunkV16 {
+                            delta_b: 0,
+                            loss: 0,
+                            new_remainder: refreshed.b_rem,
+                            remaining_after: target.saturating_sub(refreshed.b_snap),
+                        },
+                    ));
+                }
+                return Err(V16Error::BStale);
+            }
+            let price = if let Some((override_asset, override_price)) = price_override {
+                if override_asset == asset_index {
+                    override_price
+                } else {
+                    self.markets[asset_index].engine.asset.effective_price.get()
+                }
+            } else {
+                self.markets[asset_index].engine.asset.effective_price.get()
+            };
+            let risk_notional = risk_notional_ceil(refreshed.basis_pos_q.unsigned_abs(), price)?;
+            initial_req = initial_req
+                .checked_add(margin_requirement(
+                    risk_notional,
+                    config.initial_margin_bps,
+                    config.min_nonzero_im_req,
+                )?)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            maintenance_req = maintenance_req
+                .checked_add(margin_requirement(
+                    risk_notional,
+                    config.maintenance_margin_bps,
+                    config.min_nonzero_mm_req,
+                )?)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            worst_case_loss = worst_case_loss
+                .checked_add(risk_notional)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             slot += 1;
         }
+        self.settle_negative_pnl_from_principal_not_atomic(account)?;
         self.collect_account_backing_utilization_fees_not_atomic(account)?;
+        if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
+        {
+            return Err(V16Error::BStale);
+        }
         if decode_bool(account.header.stale_state)? {
             self.clear_account_stale(account)?;
         }
-        let cert = self.compute_account_health_cert(&account.as_view(), false)?;
+        let equity = self.account_haircut_equity(&account.as_view())?;
+        let cert = HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: initial_req,
+            certified_maintenance_req: maintenance_req,
+            certified_liq_deficit: if equity < 0 {
+                equity.unsigned_abs()
+            } else {
+                maintenance_req.saturating_sub(equity as u128)
+            },
+            certified_worst_case_loss: worst_case_loss,
+            cert_oracle_epoch: self.header.oracle_epoch.get(),
+            cert_funding_epoch: self.header.funding_epoch.get(),
+            cert_risk_epoch: self.header.risk_epoch.get(),
+            cert_asset_set_epoch: self.header.asset_set_epoch.get(),
+            active_bitmap_at_cert: account.header.active_bitmap.map(V16PodU64::get),
+            valid: true,
+        };
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
-        Ok(cert)
+        Ok(AccountRefreshCertOutcomeV16::Certified(cert))
     }
 
     fn has_b_stale_leg(account: &PortfolioV16View<'_>) -> V16Result<bool> {
@@ -7384,19 +7443,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     < self.header.config.max_market_slots.get() as usize
                     && Self::active_leg_slot_for_asset(&account.as_view(), request.asset_index)?
                         .is_some();
-                if let PermissionlessProgressOutcomeV16::AccountBChunk(out) = self
-                    .settle_account_side_effects_not_atomic(
-                        account,
-                        self.header.config.public_b_chunk_atoms.get(),
-                    )?
-                {
-                    self.validate_shape_audit_scan()?;
-                    return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
-                }
-                self.certify_account_after_local_settlement_with_price_override(
+                match self.refresh_account_and_certify_not_atomic(
                     account,
                     Some((request.asset_index, request.effective_price)),
-                )?;
+                    self.header.config.public_b_chunk_atoms.get(),
+                    true,
+                )? {
+                    AccountRefreshCertOutcomeV16::Certified(_) => {}
+                    AccountRefreshCertOutcomeV16::BChunk(out) => {
+                        self.validate_shape_audit_scan()?;
+                        return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
+                    }
+                }
                 touches_accrued_asset
             }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
@@ -9359,11 +9417,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return account.header.health_cert.try_to_runtime();
         }
-        self.full_account_refresh_not_atomic(account)?;
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
-        let cert = self.compute_account_health_cert(&account.as_view(), true)?;
-        account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
-        Ok(cert)
+        match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
+            AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
+            AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
+        }
     }
 
     fn ensure_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
