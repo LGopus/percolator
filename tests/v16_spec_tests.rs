@@ -1722,6 +1722,179 @@ fn v16_zero_copy_source_credit_lien_lifecycles_without_runtime_vecs() {
 }
 
 #[test]
+fn v16_zero_copy_account_source_lien_release_and_impair_without_runtime_vecs() {
+    let mut g = group();
+    g.vault = 10;
+    g.insurance = 10;
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market_view
+        .add_source_positive_claim_bound_not_atomic(0, 30 * BOUND_SCALE, 30 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .add_fresh_counterparty_backing_not_atomic(0, 20 * BOUND_SCALE, 10)
+        .unwrap();
+    market_view
+        .create_source_credit_lien_from_counterparty_not_atomic(0, 20 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .create_source_credit_lien_from_insurance_not_atomic(0, 10 * BOUND_SCALE)
+        .unwrap();
+
+    let domain_count =
+        v16_domain_count_for_market_slots(market_view.header.config.max_market_slots.get())
+            .unwrap();
+    let mut account = account_with_id(45);
+    account.ensure_source_domain_capacity(domain_count);
+    account.source_claim_market_id[0] = market_view.markets[0].engine.asset.market_id.get();
+    account.source_claim_bound_num[0] = 30 * BOUND_SCALE;
+    account.source_claim_liened_num[0] = 30 * BOUND_SCALE;
+    account.source_claim_counterparty_liened_num[0] = 20 * BOUND_SCALE;
+    account.source_claim_insurance_liened_num[0] = 10 * BOUND_SCALE;
+    account.source_lien_effective_reserved[0] = 30;
+    account.source_lien_counterparty_backing_num[0] = 20 * BOUND_SCALE;
+    account.source_lien_insurance_backing_num[0] = 10 * BOUND_SCALE;
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&account);
+    let mut account_sources =
+        PortfolioAccountV16Account::source_domains_from_runtime(&account).unwrap();
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut account_sources);
+
+    let released = market_view
+        .release_account_source_credit_liens_if_unneeded_not_atomic(&mut account_view)
+        .unwrap();
+    assert_eq!(released, 30);
+    assert_eq!(
+        account_view.source_domains[0]
+            .source_lien_effective_reserved
+            .get(),
+        0
+    );
+    assert_eq!(
+        account_view.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        account_view.source_domains[0]
+            .source_lien_insurance_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .valid_liened_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .valid_liened_insurance_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market_view.source_credit_available_backing_num(0),
+        Ok(30 * BOUND_SCALE)
+    );
+    market_view.validate_shape().unwrap();
+
+    let mut g = group();
+    g.vault = 10;
+    g.insurance = 10;
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [7u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market_view
+        .add_source_positive_claim_bound_not_atomic(0, 10 * BOUND_SCALE, 10 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
+        .unwrap();
+    market_view
+        .create_source_credit_lien_from_insurance_not_atomic(0, 10 * BOUND_SCALE)
+        .unwrap();
+
+    let domain_count =
+        v16_domain_count_for_market_slots(market_view.header.config.max_market_slots.get())
+            .unwrap();
+    let mut account = account_with_id(46);
+    account.ensure_source_domain_capacity(domain_count);
+    account.source_claim_market_id[0] = market_view.markets[0].engine.asset.market_id.get();
+    account.source_claim_bound_num[0] = 10 * BOUND_SCALE;
+    account.source_claim_liened_num[0] = 10 * BOUND_SCALE;
+    account.source_claim_insurance_liened_num[0] = 10 * BOUND_SCALE;
+    account.source_lien_effective_reserved[0] = 10;
+    account.source_lien_insurance_backing_num[0] = 10 * BOUND_SCALE;
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&account);
+    let mut account_sources =
+        PortfolioAccountV16Account::source_domains_from_runtime(&account).unwrap();
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut account_sources);
+
+    let impaired = market_view
+        .impair_account_source_credit_lien_from_insurance_not_atomic(&mut account_view, 0)
+        .unwrap();
+    assert_eq!(impaired, 10);
+    assert_eq!(
+        account_view.source_domains[0]
+            .source_claim_insurance_liened_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        account_view.source_domains[0]
+            .source_claim_impaired_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        account_view.source_domains[0]
+            .source_lien_impaired_effective_reserved
+            .get(),
+        10
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .valid_liened_insurance_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .impaired_liened_insurance_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    market_view.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_zero_copy_asset_lifecycle_and_explicit_recovery_without_runtime_vecs() {
     let g = group();
     let mut header =

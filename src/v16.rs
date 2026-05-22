@@ -4892,6 +4892,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    fn impair_account_source_credit_insurance_lien_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+        face: u128,
+        effective: u128,
+    ) -> V16Result<u128> {
+        let source = account
+            .source_domains
+            .get_mut(domain)
+            .ok_or(V16Error::InvalidLeg)?;
+        source.source_claim_insurance_liened_num = V16PodU128::new(0);
+        source.source_claim_liened_num = V16PodU128::new(
+            source
+                .source_claim_liened_num
+                .get()
+                .checked_sub(face)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_claim_impaired_num = V16PodU128::new(
+            source
+                .source_claim_impaired_num
+                .get()
+                .checked_add(face)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        source.source_lien_insurance_backing_num = V16PodU128::new(0);
+        source.source_lien_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_effective_reserved
+                .get()
+                .checked_sub(effective)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_lien_impaired_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_impaired_effective_reserved
+                .get()
+                .checked_add(effective)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        account.header.health_cert.valid = 0;
+        Ok(effective)
+    }
+
     fn burn_account_source_claim_bound_num(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -9065,6 +9109,100 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.validate_with_market(&self.as_view())?;
         }
         Ok(converted)
+    }
+
+    pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        self.settle_account_side_effects_not_atomic(
+            account,
+            self.header.config.public_b_chunk_atoms.get(),
+        )?;
+        self.certify_account_after_local_settlement_with_price_override(account, None)?;
+        let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
+        let cert = account.header.health_cert.try_to_runtime()?;
+        if no_positive < 0 || (no_positive as u128) < cert.certified_initial_req {
+            return Err(V16Error::LockActive);
+        }
+
+        let mut released_effective = 0u128;
+        let domain_count = self
+            .configured_domain_count()?
+            .min(account.source_domains.len());
+        let mut d = 0usize;
+        while d < domain_count {
+            let effective = account.source_domains[d]
+                .source_lien_effective_reserved
+                .get();
+            let counterparty_backing = account.source_domains[d]
+                .source_lien_counterparty_backing_num
+                .get();
+            let insurance_backing = account.source_domains[d]
+                .source_lien_insurance_backing_num
+                .get();
+            if counterparty_backing != 0 {
+                self.release_source_credit_lien_from_counterparty_not_atomic(
+                    d,
+                    counterparty_backing,
+                )?;
+            }
+            if insurance_backing != 0 {
+                self.release_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;
+            }
+            if effective != 0 {
+                released_effective = released_effective
+                    .checked_add(effective)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let source = &mut account.source_domains[d];
+                source.source_claim_liened_num = V16PodU128::new(0);
+                source.source_claim_counterparty_liened_num = V16PodU128::new(0);
+                source.source_claim_insurance_liened_num = V16PodU128::new(0);
+                source.source_lien_effective_reserved = V16PodU128::new(0);
+                source.source_lien_counterparty_backing_num = V16PodU128::new(0);
+                source.source_lien_insurance_backing_num = V16PodU128::new(0);
+                source.source_lien_fee_last_slot = V16PodU64::new(0);
+                Self::clear_account_source_claim_market_id_if_empty(account, d);
+            }
+            d += 1;
+        }
+        account.header.health_cert.valid = 0;
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape()?;
+        Ok(released_effective)
+    }
+
+    pub fn impair_account_source_credit_lien_from_insurance_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+    ) -> V16Result<u128> {
+        self.domain_asset_side(domain)?;
+        account.validate_with_market(&self.as_view())?;
+        let source = account
+            .source_domains
+            .get(domain)
+            .ok_or(V16Error::InvalidLeg)?;
+        let insurance_backing = source.source_lien_insurance_backing_num.get();
+        if insurance_backing == 0 {
+            return Ok(0);
+        }
+        let effective = insurance_backing / BOUND_SCALE;
+        let face = source.source_claim_insurance_liened_num.get();
+        if effective == 0 || face == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+
+        self.impair_source_credit_lien_from_insurance_core_not_atomic(domain, insurance_backing)?;
+        let effective = Self::impair_account_source_credit_insurance_lien_fields(
+            account, domain, face, effective,
+        )?;
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape()?;
+        Ok(effective)
     }
 
     fn preflight_cure_and_cancel_close(
