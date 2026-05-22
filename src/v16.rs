@@ -4721,6 +4721,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    fn validate_account_scalar_preflight(&self, account: &PortfolioV16View<'_>) -> V16Result<()> {
+        if account.header.provenance_header.market_group_id != self.header.market_group_id
+            || account.header.owner != account.header.provenance_header.owner
+            || account.header.provenance_header.version.get() != V16_ACCOUNT_VERSION
+            || account.header.provenance_header.layout_discriminator.get()
+                != V16_LAYOUT_DISCRIMINATOR
+        {
+            return Err(V16Error::ProvenanceMismatch);
+        }
+        if account.source_domains.len() < self.configured_domain_count()? {
+            return Err(V16Error::InvalidLeg);
+        }
+        let pnl = account.header.pnl.get();
+        validate_non_min_i128(pnl)?;
+        validate_fee_credits(account.header.fee_credits.get())?;
+        if account.header.reserved_pnl.get() > pnl.max(0) as u128 {
+            return Err(V16Error::InvalidLeg);
+        }
+        PortfolioV16View::validate_resolved_payout_receipt_static(
+            account.header.resolved_payout_receipt.try_to_runtime()?,
+        )?;
+        if account.header.close_progress.try_to_runtime()? != CloseProgressLedgerV16::EMPTY {
+            account.validate_close_progress_ledger_with_market(&self.as_view())?;
+        }
+        Ok(())
+    }
+
     fn configured_domain_count(&self) -> V16Result<usize> {
         v16_domain_count_for_market_slots(self.header.config.max_market_slots.get())
     }
@@ -9234,7 +9261,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<HealthCertV16> {
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_scalar_preflight(&account.as_view())?;
         if !decode_bool(account.header.stale_state)?
             && !decode_bool(account.header.b_stale_state)?
             && !Self::has_b_stale_leg(&account.as_view())?
