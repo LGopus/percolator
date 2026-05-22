@@ -4690,6 +4690,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.as_view().validate_shape()
     }
 
+    #[inline]
+    fn validate_shape_audit_scan(&self) -> V16Result<()> {
+        #[cfg(feature = "audit-scan")]
+        {
+            self.validate_shape()
+        }
+        #[cfg(not(feature = "audit-scan"))]
+        {
+            Ok(())
+        }
+    }
+
     fn configured_domain_count(&self) -> V16Result<usize> {
         v16_domain_count_for_market_slots(self.header.config.max_market_slots.get())
     }
@@ -6868,7 +6880,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let cert = self.compute_account_health_cert(&account.as_view(), false)?;
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
         account.validate_with_market(&self.as_view())?;
-        self.validate_shape()?;
+        self.validate_shape_audit_scan()?;
         Ok(cert)
     }
 
@@ -6920,7 +6932,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
-        account.validate_with_market(&self.as_view())?;
         let mut total_charged = 0u128;
         let domain_count = self
             .configured_domain_count()?
@@ -6934,6 +6945,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             d += 1;
         }
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape_audit_scan()?;
         Ok(total_charged)
     }
 
@@ -6987,8 +7000,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         bucket.utilization_fee_earnings = next_earnings;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         account.header.health_cert.valid = 0;
-        account.validate_with_market(&self.as_view())?;
-        self.validate_shape()?;
         Ok(charged)
     }
 
@@ -7281,7 +7292,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .ok_or(V16Error::CounterOverflow)?,
             );
         }
-        self.validate_shape()?;
+        self.validate_shape_audit_scan()?;
         Ok(AccrueAssetOutcomeV16 {
             dt: segment_dt,
             price_move_active: activity.price_move_active,
@@ -7342,7 +7353,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         self.header.config.public_b_chunk_atoms.get(),
                     )?
                 {
-                    self.validate_shape()?;
+                    self.validate_shape_audit_scan()?;
                     return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
                 }
                 self.certify_account_after_local_settlement_with_price_override(
@@ -7999,7 +8010,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
-        account.validate_with_market(&self.as_view())
+        Ok(())
     }
 
     fn clear_leg(
@@ -8115,7 +8126,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
-        account.validate_with_market(&self.as_view())
+        Ok(())
     }
 
     fn apply_position_delta(
@@ -8190,7 +8201,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     PortfolioLegV16Account::from_runtime(&zero_basis_leg);
                 account.header.health_cert.valid = 0;
                 self.set_asset_state(asset_index, asset)?;
-                return account.validate_with_market(&self.as_view());
+                return Ok(());
             }
             return self.clear_leg(account, asset_index);
         }
@@ -8238,7 +8249,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&old_leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
-        account.validate_with_market(&self.as_view())
+        Ok(())
     }
 
     fn set_pending_domain_loss_barrier_count(
@@ -9140,7 +9151,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.reduce_position(account, request.asset_index, close_q)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
-        self.validate_shape()?;
+        self.validate_shape_audit_scan()?;
         account.validate_with_market(&self.as_view())?;
         Ok(LiquidationOutcomeV16 {
             closed_q: close_q,
@@ -9197,7 +9208,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
-        self.validate_shape()?;
+        self.validate_shape_audit_scan()?;
         account.validate_with_market(&self.as_view())?;
         Ok(RebalanceOutcomeV16 {
             reduced_q: reduce_q,
@@ -9415,7 +9426,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
             Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
         }
-        self.validate_shape()?;
+        self.validate_shape_audit_scan()?;
         long_account.validate_with_market(&self.as_view())?;
         short_account.validate_with_market(&self.as_view())?;
         Ok(TradeOutcomeV16 {
