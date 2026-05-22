@@ -594,6 +594,124 @@ fn v16_zero_copy_trade_updates_positions_like_runtime_without_vecs() {
 }
 
 #[test]
+fn v16_zero_copy_permissionless_crank_refresh_accrues_without_runtime_vecs() {
+    let mut g = group();
+    let mut long = account();
+    g.deposit_not_atomic(&mut long, 1000).unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV16::Long, POS_SCALE, 93);
+    let req = PermissionlessCrankRequestV16 {
+        now_slot: 1,
+        asset_index: 0,
+        effective_price: 2,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV16::Refresh,
+    };
+
+    let mut runtime_g = g.clone();
+    let mut runtime_long = long.clone();
+    let expected = runtime_g
+        .permissionless_crank_not_atomic(&mut runtime_long, req, &[2; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 64],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&long);
+    let mut source_domains =
+        PortfolioAccountV16Account::source_domains_from_runtime(&long).unwrap();
+
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let outcome = market_view
+        .permissionless_crank_not_atomic(&mut account_view, req)
+        .unwrap();
+
+    assert_eq!(outcome, expected);
+    assert_eq!(market_view.header.slot_last.get(), runtime_g.slot_last);
+    assert_eq!(
+        market_view.header.current_slot.get(),
+        runtime_g.current_slot
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap(),
+        runtime_g.assets[0]
+    );
+    assert_eq!(
+        account_view.header.health_cert.try_to_runtime().unwrap(),
+        runtime_long.health_cert
+    );
+    market_view.validate_shape().unwrap();
+    account_view
+        .validate_with_market(&market_view.as_view())
+        .unwrap();
+}
+
+#[test]
+fn v16_zero_copy_permissionless_crank_flat_refresh_is_not_protective_without_vecs() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account_with_id(94);
+    let mut flat = account_with_id(95);
+    g.deposit_not_atomic(&mut flat, 1).unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    let before_asset = g.assets[0];
+    let before_slot = g.slot_last;
+    let req = PermissionlessCrankRequestV16 {
+        now_slot: 1,
+        asset_index: 0,
+        effective_price: 2,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV16::Refresh,
+    };
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 64],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&flat);
+    let mut source_domains =
+        PortfolioAccountV16Account::source_domains_from_runtime(&flat).unwrap();
+
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    assert_eq!(
+        market_view.permissionless_crank_not_atomic(&mut account_view, req),
+        Err(V16Error::NonProgress)
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap(),
+        before_asset
+    );
+    assert_eq!(market_view.header.slot_last.get(), before_slot);
+}
+
+#[test]
 fn v16_stock_reconciliation_proof_decomposes_vault_into_single_stock_classes() {
     let mut g = group();
     let mut a = account();

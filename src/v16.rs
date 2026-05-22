@@ -4886,6 +4886,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
         require_b_current: bool,
     ) -> V16Result<HealthCertV16> {
+        self.compute_account_health_cert_with_price_override(account, require_b_current, None)
+    }
+
+    fn compute_account_health_cert_with_price_override(
+        &self,
+        account: &PortfolioV16View<'_>,
+        require_b_current: bool,
+        price_override: Option<(usize, u64)>,
+    ) -> V16Result<HealthCertV16> {
         let config = self.header.config.try_to_runtime()?;
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
@@ -4901,7 +4910,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if require_b_current && self.b_target_for_leg(asset_index, leg)? > leg.b_snap {
                 return Err(V16Error::BStale);
             }
-            let price = self.markets[asset_index].engine.asset.effective_price.get();
+            let price = if let Some((override_asset, override_price)) = price_override {
+                if override_asset == asset_index {
+                    override_price
+                } else {
+                    self.markets[asset_index].engine.asset.effective_price.get()
+                }
+            } else {
+                self.markets[asset_index].engine.asset.effective_price.get()
+            };
             let risk_notional = risk_notional_ceil(leg.basis_pos_q.unsigned_abs(), price)?;
             initial_req = initial_req
                 .checked_add(margin_requirement(
@@ -4967,6 +4984,425 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
         Ok(cert)
+    }
+
+    fn has_b_stale_leg(account: &PortfolioV16View<'_>) -> V16Result<bool> {
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active && leg.b_stale {
+                return Ok(true);
+            }
+            slot += 1;
+        }
+        Ok(false)
+    }
+
+    fn mark_account_b_stale(&mut self, account: &mut PortfolioV16ViewMut<'_>) -> V16Result<()> {
+        if !decode_bool(account.header.b_stale_state)? {
+            account.header.b_stale_state = 1;
+            account.header.health_cert.valid = 0;
+            self.header.b_stale_account_count = V16PodU64::new(
+                self.header
+                    .b_stale_account_count
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn clear_account_b_stale(&mut self, account: &mut PortfolioV16ViewMut<'_>) -> V16Result<()> {
+        if Self::has_b_stale_leg(&account.as_view())? {
+            return Err(V16Error::BStale);
+        }
+        if decode_bool(account.header.b_stale_state)? {
+            account.header.b_stale_state = 0;
+            self.header.b_stale_account_count = V16PodU64::new(
+                self.header
+                    .b_stale_account_count
+                    .get()
+                    .checked_sub(1)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn mark_leg_b_stale(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        account.validate_with_market(&self.as_view())?;
+        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
+        leg.b_stale = true;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
+        self.mark_account_b_stale(account)
+    }
+
+    fn account_b_settlement_chunk_from_leg(
+        &self,
+        leg: PortfolioLegV16,
+        target: u128,
+        endpoint_delta_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        if target < leg.b_snap {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let b_remaining = target - leg.b_snap;
+        if b_remaining == 0 {
+            return Ok(AccountBSettlementChunkV16 {
+                delta_b: 0,
+                loss: 0,
+                new_remainder: leg.b_rem,
+                remaining_after: 0,
+            });
+        }
+        if leg.loss_weight == 0 || endpoint_delta_budget == 0 {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let limit = self.header.config.public_b_chunk_atoms.get();
+        let max_num = limit
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if leg.b_rem > max_num {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let max_delta_by_loss = (max_num - leg.b_rem) / leg.loss_weight;
+        let delta_b = b_remaining
+            .min(max_delta_by_loss)
+            .min(endpoint_delta_budget);
+        if delta_b == 0 {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let num = leg
+            .loss_weight
+            .checked_mul(delta_b)
+            .and_then(|v| v.checked_add(leg.b_rem))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let loss = num / SOCIAL_LOSS_DEN;
+        let new_remainder = num % SOCIAL_LOSS_DEN;
+        Ok(AccountBSettlementChunkV16 {
+            delta_b,
+            loss,
+            new_remainder,
+            remaining_after: b_remaining - delta_b,
+        })
+    }
+
+    fn account_b_settlement_chunk(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+        endpoint_delta_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        account.validate_with_market(&self.as_view())?;
+        let leg = Self::active_leg_for_asset(account, asset_index)?;
+        if !leg.active {
+            return Err(V16Error::InvalidLeg);
+        }
+        let target = self.b_target_for_leg(asset_index, leg)?;
+        if target < leg.b_snap {
+            return Err(V16Error::RecoveryRequired);
+        }
+        self.account_b_settlement_chunk_from_leg(leg, target, endpoint_delta_budget)
+    }
+
+    pub fn settle_account_b_chunk(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        endpoint_delta_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        let chunk = self.account_b_settlement_chunk(
+            &account.as_view(),
+            asset_index,
+            endpoint_delta_budget,
+        )?;
+        if chunk.delta_b == 0 {
+            if !Self::has_b_stale_leg(&account.as_view())? {
+                self.clear_account_b_stale(account)?;
+            }
+            return Ok(chunk);
+        }
+        let old_pnl = account.header.pnl.get();
+        let loss_i128 = i128::try_from(chunk.loss).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = old_pnl
+            .checked_sub(loss_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
+        leg.b_snap = leg
+            .b_snap
+            .checked_add(chunk.delta_b)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        leg.b_rem = chunk.new_remainder;
+        leg.b_stale = chunk.remaining_after != 0;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
+        self.set_account_pnl(account, new_pnl)?;
+        if chunk.remaining_after != 0 {
+            self.mark_account_b_stale(account)?;
+        } else if !Self::has_b_stale_leg(&account.as_view())? {
+            self.clear_account_b_stale(account)?;
+        }
+        account.header.health_cert.valid = 0;
+        account.validate_with_market(&self.as_view())?;
+        Ok(chunk)
+    }
+
+    fn settle_account_side_effects_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        b_delta_budget: u128,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        account.validate_with_market(&self.as_view())?;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset_index = leg.asset_index as usize;
+                self.settle_leg_kf_effects_at_slot(account, slot)?;
+                let refreshed = account.header.legs[slot].try_to_runtime()?;
+                let target = self.b_target_for_leg(asset_index, refreshed)?;
+                if target > refreshed.b_snap {
+                    self.mark_leg_b_stale(account, asset_index)?;
+                    let chunk =
+                        self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
+                    if chunk.remaining_after != 0 {
+                        return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(chunk));
+                    }
+                }
+            }
+            slot += 1;
+        }
+        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        account.header.health_cert.valid = 0;
+        Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+    }
+
+    fn certify_account_after_local_settlement_with_price_override(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        price_override: Option<(usize, u64)>,
+    ) -> V16Result<HealthCertV16> {
+        if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
+        {
+            return Err(V16Error::BStale);
+        }
+        if decode_bool(account.header.stale_state)? {
+            self.clear_account_stale(account)?;
+        }
+        let cert = self.compute_account_health_cert_with_price_override(
+            &account.as_view(),
+            true,
+            price_override,
+        )?;
+        account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        Ok(cert)
+    }
+
+    fn require_asset_accruable(&self, asset_index: usize) -> V16Result<()> {
+        match self.asset_state(asset_index)?.lifecycle {
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
+            _ => Err(V16Error::LockActive),
+        }
+    }
+
+    pub fn accrue_asset_to_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
+        let config = self.header.config.try_to_runtime()?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        if asset_index >= config.max_market_slots as usize
+            || asset_index >= self.markets.len()
+            || effective_price == 0
+            || effective_price > MAX_ORACLE_PRICE
+            || funding_rate_e9.unsigned_abs() > config.max_abs_funding_e9_per_slot as u128
+            || now_slot < self.header.current_slot.get()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        self.require_asset_accruable(asset_index)?;
+        let old = self.asset_state(asset_index)?;
+        if now_slot < old.slot_last {
+            return Err(V16Error::InvalidConfig);
+        }
+        let dt_total = now_slot - old.slot_last;
+        let segment_dt = if dt_total > config.max_accrual_dt_slots {
+            config.max_accrual_dt_slots
+        } else {
+            dt_total
+        };
+        let activity = MarketGroupV16::accrual_activity_for_asset_segment(
+            old,
+            segment_dt,
+            effective_price,
+            funding_rate_e9,
+        );
+        if activity.equity_active {
+            if segment_dt == 0 {
+                return Err(V16Error::NonProgress);
+            }
+            let price_diff = effective_price.abs_diff(old.effective_price) as u128;
+            let lhs = price_diff
+                .checked_mul(MAX_MARGIN_BPS as u128)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let rhs = (config.max_price_move_bps_per_slot as u128)
+                .checked_mul(segment_dt as u128)
+                .and_then(|v| v.checked_mul(old.effective_price as u128))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            if lhs > rhs {
+                return Err(V16Error::RecoveryRequired);
+            }
+            if !protective_progress_committed {
+                return Err(V16Error::NonProgress);
+            }
+        }
+
+        let price_delta = effective_price as i128 - old.effective_price as i128;
+        let k_delta = checked_i128_mul(price_delta, ADL_ONE as i128)?;
+        let funding_delta = if activity.funding_active {
+            let n = funding_rate_e9
+                .checked_mul(segment_dt as i128)
+                .and_then(|v| v.checked_mul(effective_price as i128))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                .checked_mul(ADL_ONE as i128)
+                .ok_or(V16Error::ArithmeticOverflow)?
+        } else {
+            0
+        };
+
+        let mut asset = old;
+        asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
+        asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
+        asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
+        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+        asset.effective_price = effective_price;
+        asset.fund_px_last = effective_price;
+        asset.slot_last = asset
+            .slot_last
+            .checked_add(segment_dt)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.set_asset_state(asset_index, asset)?;
+        self.header.current_slot = V16PodU64::new(now_slot);
+        self.header.slot_last = V16PodU64::new(asset.slot_last);
+        self.header.loss_stale_active = encode_bool(asset.slot_last < now_slot);
+        if activity.price_move_active {
+            self.header.oracle_epoch = V16PodU64::new(
+                self.header
+                    .oracle_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            );
+        }
+        if activity.funding_active {
+            self.header.funding_epoch = V16PodU64::new(
+                self.header
+                    .funding_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            );
+        }
+        self.validate_shape()?;
+        Ok(AccrueAssetOutcomeV16 {
+            dt: segment_dt,
+            price_move_active: activity.price_move_active,
+            funding_active: activity.funding_active,
+            equity_active: activity.equity_active,
+            loss_stale_after: asset.slot_last < now_slot,
+        })
+    }
+
+    pub fn declare_permissionless_recovery(
+        &mut self,
+        reason: PermissionlessRecoveryReasonV16,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        if !decode_bool(self.header.config.permissionless_recovery_enabled)? {
+            return Err(V16Error::InvalidConfig);
+        }
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
+        if let Some(existing_reason) = self.header.recovery_reason.try_to_runtime()? {
+            return Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+                existing_reason,
+            ));
+        }
+        self.header.mode = encode_market_mode(MarketModeV16::Recovery);
+        self.header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(reason));
+        self.validate_shape()?;
+        Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(reason))
+    }
+
+    pub fn permissionless_crank_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        request: PermissionlessCrankRequestV16,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            && !matches!(request.action, PermissionlessCrankActionV16::Recover(_))
+        {
+            return Err(V16Error::LockActive);
+        }
+        let protective_progress = match request.action {
+            PermissionlessCrankActionV16::Refresh => {
+                let touches_accrued_asset = request.asset_index
+                    < self.header.config.max_market_slots.get() as usize
+                    && Self::active_leg_slot_for_asset(&account.as_view(), request.asset_index)?
+                        .is_some();
+                if let PermissionlessProgressOutcomeV16::AccountBChunk(out) = self
+                    .settle_account_side_effects_not_atomic(
+                        account,
+                        self.header.config.public_b_chunk_atoms.get(),
+                    )?
+                {
+                    self.validate_shape()?;
+                    return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
+                }
+                self.certify_account_after_local_settlement_with_price_override(
+                    account,
+                    Some((request.asset_index, request.effective_price)),
+                )?;
+                touches_accrued_asset
+            }
+            PermissionlessCrankActionV16::SettleB { asset_index } => {
+                let out = self.settle_account_b_chunk(
+                    account,
+                    asset_index,
+                    self.header.config.public_b_chunk_atoms.get(),
+                )?;
+                return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
+            }
+            PermissionlessCrankActionV16::Liquidate(_) => {
+                return Err(V16Error::LockActive);
+            }
+            PermissionlessCrankActionV16::Recover(reason) => {
+                return self.declare_permissionless_recovery(reason);
+            }
+        };
+        self.accrue_asset_to_not_atomic(
+            request.asset_index,
+            request.now_slot,
+            request.effective_price,
+            request.funding_rate_e9,
+            protective_progress,
+        )?;
+        Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
     fn active_leg_slot_for_asset(
