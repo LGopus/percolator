@@ -1782,7 +1782,7 @@ impl<'a> PortfolioV16ViewMut<'a> {
 
 impl<'a> PortfolioV16View<'a> {
     pub fn validate_with_market<T>(&self, market: &MarketGroupV16View<'_, T>) -> V16Result<()> {
-        let config = market.header.config.try_to_runtime()?;
+        let config = market.header.config.try_to_runtime_shape()?;
         if self.header.provenance_header.market_group_id != market.header.market_group_id
             || self.header.owner != self.header.provenance_header.owner
             || self.header.provenance_header.version.get() != V16_ACCOUNT_VERSION
@@ -3305,7 +3305,7 @@ impl V16ConfigAccount {
         }
     }
 
-    pub fn try_to_runtime(&self) -> V16Result<V16Config> {
+    fn decode_runtime(&self) -> V16Result<V16Config> {
         let out = V16Config {
             max_portfolio_assets: self.max_portfolio_assets.get(),
             max_market_slots: self.max_market_slots.get(),
@@ -3357,6 +3357,17 @@ impl V16ConfigAccount {
                 self.public_liveness_profile_crank_forward,
             )?,
         };
+        Ok(out)
+    }
+
+    pub fn try_to_runtime_shape(&self) -> V16Result<V16Config> {
+        let out = self.decode_runtime()?;
+        out.validate_public_user_fund_shape()?;
+        Ok(out)
+    }
+
+    pub fn try_to_runtime(&self) -> V16Result<V16Config> {
+        let out = self.decode_runtime()?;
         out.validate_public_user_fund()?;
         Ok(out)
     }
@@ -4101,7 +4112,7 @@ impl MarketGroupV16HeaderAccount {
         new_asset_slot_capacity: u32,
         new_max_market_slots: u32,
     ) -> V16Result<()> {
-        let mut config = self.config.try_to_runtime()?;
+        let mut config = self.config.try_to_runtime_shape()?;
         let old_capacity = self.asset_slot_capacity.get();
         if decode_market_mode(self.mode)? != MarketModeV16::Live
             || new_asset_slot_capacity < old_capacity
@@ -4194,7 +4205,7 @@ impl MarketGroupV16HeaderAccount {
         slots: &[S],
     ) -> V16Result<MarketGroupV16> {
         self.validate_dynamic_market_slots_shape(slots)?;
-        let config = self.config.try_to_runtime()?;
+        let config = self.config.try_to_runtime_shape()?;
         let capacity = self.asset_slot_capacity.get() as usize;
         let assets = vec![AssetStateV16::default(); capacity];
         let domain_count = capacity
@@ -4349,7 +4360,7 @@ impl MarketGroupV16HeaderAccount {
         authenticated_price: u64,
         now_slot: u64,
     ) -> V16Result<()> {
-        let config = self.config.try_to_runtime()?;
+        let config = self.config.try_to_runtime_shape()?;
         let capacity = self.asset_slot_capacity.get();
         if asset_index >= capacity || asset_index as usize >= config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
@@ -4493,10 +4504,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
     pub fn validate_shape(&self) -> V16Result<()> {
         self.header
             .validate_dynamic_market_slots_shape(self.markets)?;
-        self.header
-            .config
-            .try_to_runtime()?
-            .validate_public_user_fund_shape()?;
+        self.header.config.try_to_runtime_shape()?;
         decode_bool(self.header.bankruptcy_hlock_active)?;
         decode_bool(self.header.threshold_stress_active)?;
         decode_bool(self.header.loss_stale_active)?;
@@ -4739,9 +4747,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 != V16_LAYOUT_DISCRIMINATOR
         {
             return Err(V16Error::ProvenanceMismatch);
-        }
-        if account.source_domains.len() < self.configured_domain_count()? {
-            return Err(V16Error::InvalidLeg);
         }
         let pnl = account.header.pnl.get();
         validate_non_min_i128(pnl)?;
@@ -5049,7 +5054,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(bucket.expiry_slot);
         }
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         let freshness_horizon = config
             .max_accrual_dt_slots
             .max(config.h_max)
@@ -6792,7 +6797,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         require_b_current: bool,
         price_override: Option<(usize, u64)>,
     ) -> V16Result<HealthCertV16> {
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
         let mut worst_case_loss = 0u128;
@@ -6873,22 +6878,75 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_delta_budget: u128,
         allow_b_chunk: bool,
     ) -> V16Result<AccountRefreshCertOutcomeV16> {
-        account.validate_with_market(&self.as_view())?;
+        self.validate_account_scalar_preflight(&account.as_view())?;
+        account
+            .as_view()
+            .validate_source_credit_shape_with_market(&self.as_view())?;
+        let source_claim_sum_num = account.as_view().source_claim_bound_sum_num()?;
+        if source_claim_sum_num != 0 {
+            let required = V16Core::bound_num_from_amount(account.header.pnl.get().max(0) as u128)?;
+            if source_claim_sum_num < required {
+                return Err(V16Error::InvalidLeg);
+            }
+        }
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
         let mut worst_case_loss = 0u128;
+        let active_leg_cap = config.max_portfolio_assets as usize;
+        let configured_assets = config.max_market_slots as usize;
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut seen_assets = [u32::MAX; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_asset_count = 0usize;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if !leg.active {
+            let bit = active_bitmap_get(bitmap, slot);
+            if slot >= active_leg_cap {
+                if bit || !leg.is_empty() {
+                    return Err(V16Error::HiddenLeg);
+                }
                 slot += 1;
                 continue;
             }
+            if bit != leg.active {
+                return Err(V16Error::HiddenLeg);
+            }
+            if !leg.active {
+                if !leg.is_empty() {
+                    return Err(V16Error::HiddenLeg);
+                }
+                slot += 1;
+                continue;
+            }
+            validate_active_leg(leg)?;
             let asset_index = leg.asset_index as usize;
+            if asset_index >= configured_assets || asset_index >= self.markets.len() {
+                return Err(V16Error::HiddenLeg);
+            }
+            let asset = self.markets[asset_index].engine.asset.try_to_runtime()?;
+            if leg.market_id != asset.market_id
+                || !matches!(
+                    asset.lifecycle,
+                    AssetLifecycleV16::Active
+                        | AssetLifecycleV16::DrainOnly
+                        | AssetLifecycleV16::Recovery
+                )
+            {
+                return Err(V16Error::HiddenLeg);
+            }
+            let mut seen = 0usize;
+            while seen < seen_asset_count {
+                if seen_assets[seen] == leg.asset_index {
+                    return Err(V16Error::HiddenLeg);
+                }
+                seen += 1;
+            }
+            seen_assets[seen_asset_count] = leg.asset_index;
+            seen_asset_count += 1;
             self.settle_leg_kf_effects_at_slot(account, slot)?;
             let mut refreshed = account.header.legs[slot].try_to_runtime()?;
             let target = self.b_target_for_leg(asset_index, refreshed)?;
@@ -6947,7 +7005,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             slot += 1;
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
         {
@@ -7071,7 +7129,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let fee = V16Core::backing_utilization_fee_quote_atoms_for_lien(
-            self.header.config.try_to_runtime()?,
+            self.header.config.try_to_runtime_shape()?,
             self.source_credit_for_domain(domain)?,
             lien_backing_num,
             last_slot,
@@ -7290,7 +7348,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         funding_rate_e9: i128,
         protective_progress_committed: bool,
     ) -> V16Result<AccrueAssetOutcomeV16> {
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -7951,7 +8009,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn validate_trade_request(&self, request: TradeRequestV16) -> V16Result<()> {
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         if request.asset_index >= config.max_market_slots as usize
             || request.size_q == 0
             || request.size_q > MAX_TRADE_SIZE_Q
@@ -9202,7 +9260,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         if request.asset_index >= config.max_market_slots as usize
             || request.close_q == 0
             || request.fee_bps > config.liquidation_fee_bps.max(config.max_trading_fee_bps)
@@ -9210,23 +9268,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         self.require_asset_live_reducible(request.asset_index)?;
-        account.validate_with_market(&self.as_view())?;
-        let pre_leg_slot =
-            Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
-        let pre_leg = account.header.legs[pre_leg_slot].try_to_runtime()?;
-        let pre_close_q = request.close_q.min(pre_leg.basis_pos_q.unsigned_abs());
-        if pre_close_q != 0 && account.header.pnl.get() < 0 {
-            self.preflight_liquidation_residual_durability(
-                request.asset_index,
-                pre_leg.side,
-                &account.as_view(),
-            )?;
-        }
-        self.settle_account_side_effects_not_atomic(
+        self.validate_account_scalar_preflight(&account.as_view())?;
+        Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
+        match self.refresh_account_and_certify_not_atomic(
             account,
+            None,
             self.header.config.public_b_chunk_atoms.get(),
-        )?;
-        self.certify_account_after_local_settlement_with_price_override(account, None)?;
+            false,
+        )? {
+            AccountRefreshCertOutcomeV16::Certified(_) => {}
+            AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
+        }
         let cert = account.header.health_cert.try_to_runtime()?;
         if cert.certified_liq_deficit == 0 {
             return Err(V16Error::NonProgress);
@@ -9287,7 +9339,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .max(config.min_liquidation_abs)
             .min(config.liquidation_fee_cap);
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
             account.header.pnl.get().unsigned_abs()
         } else {
@@ -9474,7 +9526,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let existing = account.header.health_cert.try_to_runtime()?;
         let old_notional = risk_notional_ceil(old_abs_q, price)?;
         let new_notional = risk_notional_ceil(new_abs_q, price)?;
-        let config = self.header.config.try_to_runtime()?;
+        let config = self.header.config.try_to_runtime_shape()?;
         let old_initial = margin_requirement(
             old_notional,
             config.initial_margin_bps,
@@ -9758,6 +9810,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         account.validate_with_market(&self.as_view())?;
+        let paid = self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        self.validate_account_audit_scan(&account.as_view())?;
+        self.validate_shape_audit_scan()?;
+        Ok(paid)
+    }
+
+    fn settle_negative_pnl_from_principal_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
         let pnl = account.header.pnl.get();
         if pnl >= 0 {
             return Ok(0);
@@ -9766,8 +9828,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let paid = account.header.capital.get().min(loss);
         if paid == 0 {
             self.header.bankruptcy_hlock_active = 1;
-            self.validate_shape_audit_scan()?;
-            self.validate_account_audit_scan(&account.as_view())?;
             return Ok(0);
         }
 
@@ -9801,8 +9861,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         account.header.health_cert.valid = 0;
-        self.validate_account_audit_scan(&account.as_view())?;
-        self.validate_shape_audit_scan()?;
         Ok(paid)
     }
 
