@@ -14437,7 +14437,11 @@ impl MarketGroupV16 {
         self.slot_last = asset.slot_last;
         // Fix (issue #106): mirror of the zero-copy fix above. See the comment
         // in the zero-copy `accrue_asset_to_not_atomic` for full rationale.
-        let n_markets = self.config.max_market_slots as usize;
+        // `self.assets.len()` is invariant-equal to `self.config.max_market_slots`
+        // after construction, but the `min` is a defensive bound for parity with
+        // the zero-copy path's `min(configured, self.markets.len())`.
+        let configured = self.config.max_market_slots as usize;
+        let n_markets = core::cmp::min(configured, self.assets.len());
         let mut any_loss_stale = false;
         let mut k = 0usize;
         while k < n_markets {
