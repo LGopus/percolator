@@ -1065,6 +1065,7 @@ fn v16_reservation_encumbrance_proof_validates_source_domain_ledgers() {
         .unwrap();
     g.insurance = 3 * BOUND_SCALE;
     g.vault = g.vault.checked_add(g.insurance).unwrap();
+    g.insurance_domain_budget[0] = 3;
     g.reserve_insurance_credit_not_atomic(0, 3 * BOUND_SCALE)
         .unwrap();
     g.create_source_credit_lien_from_insurance_not_atomic(0, BOUND_SCALE)
@@ -1373,6 +1374,7 @@ fn v16_expired_fresh_backing_requires_refresh_before_source_credit_conversion() 
     let mut other_claimant = account_with_id(49);
     g.vault = 1_000;
     g.insurance = 300;
+    g.insurance_domain_budget[0] = 300;
     g.add_account_source_positive_pnl_not_atomic(&mut a, 0, 300)
         .unwrap();
     g.add_account_source_positive_pnl_not_atomic(&mut other_claimant, 0, 100)
@@ -1737,6 +1739,7 @@ fn v16_zero_copy_source_credit_lien_lifecycles_without_runtime_vecs() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[1] = 50;
     let mut header =
         MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
     let mut markets = (0..g.assets.len())
@@ -1894,6 +1897,7 @@ fn v16_zero_copy_account_source_lien_release_and_impair_without_runtime_vecs() {
     let mut g = group();
     g.vault = 10;
     g.insurance = 10;
+    g.insurance_domain_budget[0] = 10;
     let mut header =
         MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
     let mut markets = (0..g.assets.len())
@@ -1985,6 +1989,7 @@ fn v16_zero_copy_account_source_lien_release_and_impair_without_runtime_vecs() {
     let mut g = group();
     g.vault = 10;
     g.insurance = 10;
+    g.insurance_domain_budget[0] = 10;
     let mut header =
         MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
     let mut markets = (0..g.assets.len())
@@ -2318,6 +2323,7 @@ fn v16_insurance_backed_source_lien_releases_after_no_positive_credit_health_is_
     g.vault = g.vault.checked_add(10).unwrap();
     g.insurance = 10 * BOUND_SCALE;
     g.vault = g.vault.checked_add(g.insurance).unwrap();
+    g.insurance_domain_budget[0] = g.insurance;
     g.add_account_source_positive_pnl_not_atomic(&mut a, 0, 10)
         .unwrap();
     g.reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
@@ -2367,6 +2373,7 @@ fn v16_insurance_backed_source_lien_impairment_removes_account_health_credit() {
     g.vault = g.vault.checked_add(10).unwrap();
     g.insurance = 10 * BOUND_SCALE;
     g.vault = g.vault.checked_add(g.insurance).unwrap();
+    g.insurance_domain_budget[0] = g.insurance;
     g.add_account_source_positive_pnl_not_atomic(&mut a, 0, 10)
         .unwrap();
     g.reserve_insurance_credit_not_atomic(0, 10 * BOUND_SCALE)
@@ -2787,6 +2794,7 @@ fn v16_insurance_credit_reservation_lifecycle_tracks_encumbrance_once() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     let lien_release = 20 * BOUND_SCALE;
     let lien_impair = 15 * BOUND_SCALE;
@@ -2841,6 +2849,7 @@ fn v16_insurance_lien_consume_overflow_rejects_before_mutation() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     let lien = 20 * BOUND_SCALE;
     g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
@@ -2872,6 +2881,7 @@ fn v16_insurance_lien_consume_domain_spent_overflow_rejects_before_mutation() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     let lien = 20 * BOUND_SCALE;
     g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
@@ -2903,6 +2913,7 @@ fn v16_insurance_lien_impair_overflow_rejects_before_mutation() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     let lien = 20 * BOUND_SCALE;
     g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
@@ -2930,6 +2941,7 @@ fn v16_insurance_lien_impair_source_overflow_rejects_before_mutation() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     let lien = 20 * BOUND_SCALE;
     g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
@@ -2957,6 +2969,7 @@ fn v16_insurance_lien_create_overflow_rejects_before_mutation() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
         .unwrap();
@@ -2981,6 +2994,7 @@ fn v16_insurance_lien_release_epoch_overflow_rejects_before_mutation() {
     let mut g = group();
     g.vault = 100;
     g.insurance = 100;
+    g.insurance_domain_budget[0] = 100;
     let reserve = 60 * BOUND_SCALE;
     let lien = 20 * BOUND_SCALE;
     g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
@@ -3082,6 +3096,7 @@ fn v16_insurance_credit_reservation_uses_scaled_num_not_quote_atoms() {
     let mut g = group();
     g.vault = 5;
     g.insurance = 5;
+    g.insurance_domain_budget[0] = 5;
 
     g.reserve_insurance_credit_not_atomic(0, 5 * BOUND_SCALE)
         .unwrap();
@@ -8519,6 +8534,7 @@ fn v16_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual() 
     g.attach_leg(&mut victim, 0, SideV16::Long, 1).unwrap();
     g.vault = 1;
     g.insurance = 1;
+    g.insurance_domain_budget[1] = 1;
     victim.pnl = -3;
     g.negative_pnl_account_count = 1;
 
@@ -8732,6 +8748,7 @@ fn v16_resolved_bankrupt_active_negative_consumes_insurance_then_unblocks_winner
     let mut winner = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [47; 32], owner));
     g.vault = 5;
     g.insurance = 5;
+    g.insurance_domain_budget[1] = 5;
     bankrupt.pnl = -5;
     winner.pnl = 5;
     g.negative_pnl_account_count = 1;
@@ -9354,6 +9371,7 @@ fn v16_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     let mut opposing = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
     g.vault = 4;
     g.insurance = 4;
+    g.insurance_domain_budget[1] = 4;
     a.pnl = -9;
     g.negative_pnl_account_count = 1;
     g.attach_leg(&mut a, 0, SideV16::Long, 1).unwrap();
@@ -9430,12 +9448,51 @@ fn v16_domain_insurance_budget_caps_bankruptcy_spend_for_one_asset_side() {
 }
 
 #[test]
+fn v16_unbudgeted_domain_cannot_spend_global_insurance_on_bankruptcy() {
+    let mut g = group();
+    let mut bankrupt_long = account();
+    let mut opposing_short = account_with_id(46);
+    g.vault = 50_025;
+    g.insurance = 50_025;
+    g.attach_leg(&mut bankrupt_long, 0, SideV16::Long, 1)
+        .unwrap();
+    g.attach_leg(&mut opposing_short, 0, SideV16::Short, -1)
+        .unwrap();
+    bankrupt_long.pnl = -50_000;
+    g.negative_pnl_account_count = 1;
+
+    let out = g
+        .liquidate_account_not_atomic(
+            &mut bankrupt_long,
+            LiquidationRequestV16 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 0,
+            },
+            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .expect("bankruptcy should make social-loss progress without domain insurance budget");
+
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(out.residual_booked, 50_000);
+    assert_eq!(
+        g.insurance, 50_025,
+        "global insurance must not be spendable by an unfunded domain"
+    );
+    assert_eq!(g.insurance_domain_spent[1], 0);
+    assert_eq!(bankrupt_long.pnl, 0);
+    assert_eq!(bankrupt_long.active_bitmap, bitmap(&[]));
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
 fn v16_bankruptcy_insurance_spend_excludes_source_credit_reserved_insurance() {
     let mut g = group();
     let mut bankrupt_long = account();
     let mut opposing_short = account_with_id(47);
     g.vault = 10;
     g.insurance = 10;
+    g.insurance_domain_budget[1] = 10;
     g.reserve_insurance_credit_not_atomic(1, 10 * BOUND_SCALE)
         .unwrap();
     bankrupt_long.pnl = -5;
@@ -9478,6 +9535,7 @@ fn v16_zero_copy_bankruptcy_insurance_spend_excludes_source_credit_reserved_insu
     let mut opposing_short = account_with_id(48);
     g.vault = 10;
     g.insurance = 10;
+    g.insurance_domain_budget[1] = 10;
     g.reserve_insurance_credit_not_atomic(1, 10 * BOUND_SCALE)
         .unwrap();
     bankrupt_long.pnl = -5;
@@ -9664,6 +9722,40 @@ fn v16_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
 }
 
 #[test]
+fn v16_public_invariants_reject_overallocated_domain_insurance_budgets() {
+    let mut g = group();
+    g.vault = 5;
+    g.insurance = 5;
+    g.insurance_domain_budget = vec![0; g.insurance_domain_budget.len()];
+    g.insurance_domain_budget[0] = 5;
+    g.insurance_domain_budget[1] = 1;
+
+    assert_eq!(g.assert_public_invariants(), Err(V16Error::InvalidConfig));
+}
+
+#[test]
+fn v16_zero_copy_shape_rejects_overallocated_domain_insurance_budgets() {
+    let mut g = group();
+    g.vault = 5;
+    g.insurance = 5;
+    g.insurance_domain_budget = vec![0; g.insurance_domain_budget.len()];
+    g.insurance_domain_budget[0] = 5;
+    g.insurance_domain_budget[1] = 1;
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: (),
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    assert_eq!(view.validate_shape(), Err(V16Error::InvalidConfig));
+}
+
+#[test]
 fn v16_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() {
     let (market, _, owner) = ids();
     let mut cfg = V16Config::public_user_fund(1, 0, 10);
@@ -9678,6 +9770,7 @@ fn v16_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() 
     let mut opposing = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
     g.vault = 2;
     g.insurance = 2;
+    g.insurance_domain_budget[1] = 2;
     a.pnl = -5;
     g.negative_pnl_account_count = 1;
     g.attach_leg(&mut a, 0, SideV16::Long, 1).unwrap();
