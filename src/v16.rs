@@ -7455,7 +7455,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_asset_state(asset_index, asset)?;
         self.header.current_slot = V16PodU64::new(now_slot);
         self.header.slot_last = V16PodU64::new(asset.slot_last);
-        self.header.loss_stale_active = encode_bool(asset.slot_last < now_slot);
+        // Fix (issue #106): loss_stale_active is a GROUP-WIDE flag consumed
+        // by drain-detection, trade preflight, withdrawal, and several other
+        // gates. It must reflect the union of per-asset staleness across all
+        // accruable assets — not the freshness of the single asset cranked
+        // here. Setting it from one asset's slot_last allowed an attacker
+        // who controlled (or could nudge) any Active|DrainOnly asset to clear
+        // the bit on behalf of the whole group, defeating the gate even when
+        // other assets were stale.
+        let configured = self.header.config.max_market_slots.get() as usize;
+        let n_markets = core::cmp::min(configured, self.markets.len());
+        let mut any_loss_stale = false;
+        let mut k = 0usize;
+        while k < n_markets {
+            let lc = decode_asset_lifecycle(self.markets[k].engine.asset.lifecycle)?;
+            if matches!(lc, AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly)
+                && self.markets[k].engine.asset.slot_last.get() < now_slot
+            {
+                any_loss_stale = true;
+                break;
+            }
+            k += 1;
+        }
+        self.header.loss_stale_active = encode_bool(any_loss_stale);
         if activity.price_move_active {
             self.header.oracle_epoch = V16PodU64::new(
                 self.header
@@ -14413,7 +14435,22 @@ impl MarketGroupV16 {
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.current_slot = now_slot;
         self.slot_last = asset.slot_last;
-        self.loss_stale_active = asset.slot_last < now_slot;
+        // Fix (issue #106): mirror of the zero-copy fix above. See the comment
+        // in the zero-copy `accrue_asset_to_not_atomic` for full rationale.
+        let n_markets = self.config.max_market_slots as usize;
+        let mut any_loss_stale = false;
+        let mut k = 0usize;
+        while k < n_markets {
+            let lc = self.assets[k].lifecycle;
+            if matches!(lc, AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly)
+                && self.assets[k].slot_last < now_slot
+            {
+                any_loss_stale = true;
+                break;
+            }
+            k += 1;
+        }
+        self.loss_stale_active = any_loss_stale;
         if price_move_active {
             self.oracle_epoch = self
                 .oracle_epoch
@@ -14432,7 +14469,9 @@ impl MarketGroupV16 {
             price_move_active,
             funding_active,
             equity_active,
-            loss_stale_after: self.loss_stale_active,
+            // The per-asset return value remains per-asset (matches zero-copy
+            // path); the group-wide flag is the one we widened.
+            loss_stale_after: self.assets[asset_index].slot_last < now_slot,
         })
     }
 

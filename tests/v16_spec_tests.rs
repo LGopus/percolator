@@ -1384,7 +1384,17 @@ fn v16_expired_fresh_backing_requires_refresh_before_source_credit_conversion() 
 
     let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
     g.full_account_refresh(&mut a, &prices).unwrap();
-    g.accrue_asset_to_not_atomic(0, 1, 1, 0, true).unwrap();
+    // Issue #106: `header.loss_stale_active` is now a group-wide flag, so
+    // every accruable asset must be cranked to slot 1 to clear it. Cranking
+    // only asset 0 leaves assets 1..N stale and the bit set, which would
+    // mask this test's account-level Stale check behind a group-level
+    // LockActive error.
+    let n_assets = g.config.max_market_slots as usize;
+    let mut i = 0usize;
+    while i < n_assets {
+        g.accrue_asset_to_not_atomic(i, 1, 1, 0, true).unwrap();
+        i += 1;
+    }
     assert_eq!(g.current_slot, 1);
     assert!(a.health_cert.valid);
     assert_eq!(a.health_cert.cert_oracle_epoch, g.oracle_epoch);
@@ -4052,7 +4062,18 @@ fn v16_health_certificate_is_bound_to_market_epochs_and_prices() {
     );
     g.asset_set_epoch -= 1;
 
+    // Issue #106: crank every accruable asset so `header.loss_stale_active`
+    // remains clear. Only asset 0 advances oracle_epoch (price 1 → 2); the
+    // others stay flat. This isolates the test's intent — that the bumped
+    // oracle_epoch makes `long`'s health_cert stale — from the unrelated
+    // group-level loss-stale gate.
     g.accrue_asset_to_not_atomic(0, 1, 2, 0, true).unwrap();
+    let n_assets = g.config.max_market_slots as usize;
+    let mut i = 1usize;
+    while i < n_assets {
+        g.accrue_asset_to_not_atomic(i, 1, 1, 0, true).unwrap();
+        i += 1;
+    }
     assert_eq!(
         g.ensure_favorable_action_allowed(&long),
         Err(V16Error::Stale)
@@ -6488,6 +6509,14 @@ fn v16_e2e_trade_mark_close_convert_withdraw_conserves() {
         &px2,
     )
     .unwrap();
+    // Issue #106: crank the remaining accruable assets so the group-wide
+    // `loss_stale_active` flag is cleared. Only asset 0 has OI in this test.
+    let n_assets = g.config.max_market_slots as usize;
+    let mut i = 1usize;
+    while i < n_assets {
+        g.accrue_asset_to_not_atomic(i, 1, 1, 0, true).unwrap();
+        i += 1;
+    }
     g.full_account_refresh(&mut alice, &px2).unwrap();
     g.full_account_refresh(&mut bob, &px2).unwrap();
     assert!(
@@ -9688,3 +9717,68 @@ fn v16_rebalance_rejects_missing_or_zero_progress() {
         Err(V16Error::InvalidConfig)
     );
 }
+
+// =========================================================================
+// Issue #106 — regression test for `header.loss_stale_active`
+// =========================================================================
+//
+// Prior to the fix, `accrue_asset_to_not_atomic` set the group-wide
+// `loss_stale_active` flag from a single asset's freshness. This let a
+// crank of any one Active|DrainOnly asset clear the bit even when other
+// accruable assets remained stale, defeating seven downstream gates.
+
+#[test]
+fn v16_106_loss_stale_active_remains_set_when_other_assets_stale() {
+    let (market, _, _) = ids();
+    let cfg = V16Config::public_user_fund(2, 0, 1);
+    let mut g = MarketGroupV16::new(market, cfg).unwrap();
+
+    // Both assets start at slot_last = 0, lifecycle = Active.
+    assert_eq!(g.assets[0].slot_last, 0);
+    assert_eq!(g.assets[1].slot_last, 0);
+
+    // Crank asset 0 only to now_slot = 1.
+    let now_slot = 1u64;
+    let out = g
+        .accrue_asset_to_not_atomic(0, now_slot, 1, 0, true)
+        .unwrap();
+
+    // Asset 0 should be fresh; asset 1 should still be stale.
+    assert_eq!(g.assets[0].slot_last, now_slot);
+    assert_eq!(g.assets[1].slot_last, 0);
+    assert!(g.assets[1].slot_last < now_slot);
+
+    // The per-asset return value is per-asset and unchanged.
+    assert!(!out.loss_stale_after);
+
+    // The group-wide flag must reflect that asset 1 is still stale.
+    // Under the bug, this assertion fails: the flag is cleared.
+    assert!(
+        g.loss_stale_active,
+        "header.loss_stale_active must remain TRUE while asset 1 is still stale; \
+         see issue #106 for the bug this regression test guards against"
+    );
+}
+
+#[test]
+fn v16_106_loss_stale_active_clears_only_when_all_accruable_assets_fresh() {
+    let (market, _, _) = ids();
+    let cfg = V16Config::public_user_fund(2, 0, 1);
+    let mut g = MarketGroupV16::new(market, cfg).unwrap();
+
+    let now_slot = 1u64;
+    // Crank asset 0 → flag must remain set (asset 1 still stale).
+    g.accrue_asset_to_not_atomic(0, now_slot, 1, 0, true)
+        .unwrap();
+    assert!(g.loss_stale_active);
+
+    // Crank asset 1 → both assets fresh, flag clears.
+    g.accrue_asset_to_not_atomic(1, now_slot, 1, 0, true)
+        .unwrap();
+    assert!(!g.loss_stale_active);
+}
+
+// Note: the non-accruable-lifecycle filter is covered by the Kani harness
+// `proof_v16_106_only_accruable_lifecycles_contribute` in proofs_v16.rs;
+// reproducing it as a runtime test requires assembling the full invariant
+// preconditions for a Retired asset (retired_slot, OI residuals, etc.).

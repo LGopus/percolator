@@ -11565,3 +11565,125 @@ fn proof_v16_resolved_active_position_close_returns_progress_without_payout() {
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.c_tot, before_c_tot);
 }
+
+// =========================================================================
+// Issue #106 — regression proof for `header.loss_stale_active`
+// =========================================================================
+//
+// The bug: prior to the fix, `accrue_asset_to_not_atomic` set the group-wide
+// `loss_stale_active` flag from a single asset's freshness:
+//
+//     self.loss_stale_active = asset.slot_last < now_slot;
+//
+// On a multi-asset group, cranking any one Active|DrainOnly asset to
+// `now_slot` cleared the bit even when other accruable assets were still
+// stale. Seven downstream gates (drain detection, trade preflight,
+// withdrawal, …) consume the flag — so a single permissionless crank
+// disabled them all.
+//
+// The fix replaces the single-asset comparison with the union across all
+// accruable assets. These proofs assert the invariant directly.
+
+/// Direct invariant: after `accrue_asset_to_not_atomic`, the group-wide
+/// `loss_stale_active` flag equals `∃k. lifecycle(k) ∈ {Active, DrainOnly}
+/// ∧ slot_last(k) < now_slot`. Symbolic over `accrue_asset_index` so the
+/// proof covers cranking *any* asset (including the previously-stale one).
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_106_loss_stale_active_reflects_group_wide_union() {
+    let (market, _account_id, _owner) = symbolic_ids();
+    let mut config = V16Config::public_user_fund(2, 0, 1);
+    // Allow full catch-up in one segment so the cranked asset can become
+    // fresh, exposing the bug's masking behaviour.
+    config.max_accrual_dt_slots = 10;
+    config.min_funding_lifetime_slots = 10;
+    let mut group = MarketGroupV16::new(market, config).unwrap();
+
+    // Both assets start at slot_last = 0, lifecycle = Active (defaults).
+    let now_slot: u64 = 1;
+    let accrue_asset_index: usize = kani::any();
+    kani::assume(accrue_asset_index < 2);
+
+    let _ = group.accrue_asset_to_not_atomic(accrue_asset_index, now_slot, 1, 0, true);
+
+    // Compute the expected value: an oracle implementation of the invariant.
+    let other = 1 - accrue_asset_index;
+    let other_stale = matches!(
+        group.assets[other].lifecycle,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+    ) && group.assets[other].slot_last < now_slot;
+    let cranked_stale = matches!(
+        group.assets[accrue_asset_index].lifecycle,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+    ) && group.assets[accrue_asset_index].slot_last < now_slot;
+    let expected = other_stale || cranked_stale;
+
+    // Under the bug, when `accrue_asset_index` becomes fresh and `other`
+    // stays stale (slot_last=0 < now_slot=1), the flag was cleared but
+    // `expected` is true → assert fails.
+    assert_eq!(group.loss_stale_active, expected);
+}
+
+/// Coverage proof: the buggy scenario IS reachable — cranking one asset
+/// fresh while the other stays stale. This guards against the invariant
+/// proof being vacuously satisfied by an over-constrained model.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_106_buggy_scenario_is_reachable_under_fixed_semantics() {
+    let (market, _account_id, _owner) = symbolic_ids();
+    let mut config = V16Config::public_user_fund(2, 0, 1);
+    config.max_accrual_dt_slots = 10;
+    config.min_funding_lifetime_slots = 10;
+    let mut group = MarketGroupV16::new(market, config).unwrap();
+
+    let now_slot: u64 = 1;
+    group.accrue_asset_to_not_atomic(0, now_slot, 1, 0, true).unwrap();
+
+    // Asset 0 is now fresh (slot_last == now_slot == 1).
+    kani::cover!(
+        group.assets[0].slot_last == now_slot,
+        "v16 #106 cranked asset becomes fresh"
+    );
+    // Asset 1 stayed stale (slot_last == 0 < now_slot == 1).
+    kani::cover!(
+        group.assets[1].slot_last < now_slot,
+        "v16 #106 untouched asset remains stale"
+    );
+    // The fix correctly keeps `loss_stale_active` set because asset 1 is stale.
+    assert!(group.loss_stale_active);
+}
+
+/// Non-accruable lifecycles must not contribute to the group-wide flag.
+/// If every asset except `accrue_asset_index` is Disabled/Retired/Recovery
+/// or PendingActivation, cranking that asset to `now_slot` must clear the
+/// flag — because no other asset is accruable in a way that would matter
+/// to the gates that read `loss_stale_active`.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_106_only_accruable_lifecycles_contribute() {
+    let (market, _account_id, _owner) = symbolic_ids();
+    let mut config = V16Config::public_user_fund(2, 0, 1);
+    config.max_accrual_dt_slots = 10;
+    config.min_funding_lifetime_slots = 10;
+    let mut group = MarketGroupV16::new(market, config).unwrap();
+
+    // Asset 1 transitions to a non-accruable lifecycle.
+    group.assets[1].lifecycle = symbolic_non_active_lifecycle();
+    // We only care about the engine-rejected lifecycles for accrual.
+    kani::assume(!matches!(
+        group.assets[1].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    ));
+
+    let now_slot: u64 = 1;
+    group.accrue_asset_to_not_atomic(0, now_slot, 1, 0, true).unwrap();
+
+    // Asset 1 is non-accruable (Disabled / PendingActivation / Retired /
+    // Recovery), so the union is exactly `asset_0.slot_last < now_slot`
+    // restricted to {Active, DrainOnly}. After the crank, asset 0 is fresh
+    // → the flag must be cleared.
+    assert!(!group.loss_stale_active);
+}
