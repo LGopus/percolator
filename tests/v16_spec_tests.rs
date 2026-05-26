@@ -8843,6 +8843,58 @@ fn v16_resolved_close_with_active_position_detaches_leg_and_pays_capital() {
 }
 
 #[test]
+fn v16_zero_copy_resolved_close_with_active_position_detaches_leg_and_pays_capital() {
+    // Mirror of the test above, exercised against the zero-copy
+    // `MarketGroupV16ViewMut::close_resolved_account_not_atomic` API path
+    // that the wrapper actually uses in production (`handle_close_resolved`
+    // -> `state::market_view_mut`). Without the corresponding zero-copy
+    // fix added in this PR, production close_resolved returns
+    // ProgressOnly for solvent users with active legs — same bug class
+    // as issue #61 but on the view path the wrapper invokes.
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 777).unwrap();
+    g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.resolve_market_not_atomic(1).unwrap();
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: 0u64,
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&a);
+    let mut source_domains = PortfolioAccountV16Account::source_domains_from_runtime(&a).unwrap();
+
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let out = market_view
+        .close_resolved_account_not_atomic(&mut account_view, 0)
+        .unwrap();
+
+    assert_eq!(out, ResolvedCloseOutcomeV16::Closed { payout: 777 });
+    assert_eq!(account_view.header.capital.get(), 0);
+    assert!(percolator::active_bitmap_is_empty(
+        account_view.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(market_view.header.vault.get(), 0);
+    assert_eq!(market_view.header.c_tot.get(), 0);
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .stored_pos_count_long
+            .get(),
+        0
+    );
+}
+
+#[test]
 fn v16_resolved_close_detaches_balanced_counterparties_paying_both() {
     // Two solvent users on opposite sides of the same asset, both with zero
     // mark-to-market PnL. After resolve, each can close in a single

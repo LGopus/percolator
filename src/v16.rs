@@ -10822,6 +10822,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
+        // Detach solvent active legs after K/F/B settlement so the close
+        // can complete. Same semantics as the Vec runtime variant — see
+        // `MarketGroupV16::detach_solvent_active_legs_for_resolved_close`
+        // (defined later in this file, around line 15275 after rebase) for
+        // the full rationale, v12 parity references, and the
+        // bankrupt-account no-op condition. This is the zero-copy mirror
+        // for the wrapper-callable production path.
+        self.detach_solvent_active_legs_for_resolved_close(account)?;
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
             || account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
@@ -10890,6 +10898,66 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
+    }
+
+    /// Zero-copy mirror of `MarketGroupV16::detach_solvent_active_legs_for_resolved_close`.
+    /// See that function's doc comment for the full semantics — same
+    /// preconditions, same per-leg pre-check loop, same slot-order detach.
+    /// Translates each `account.<field>` Vec-runtime access to
+    /// `account.header.<field>.get()` / `.try_to_runtime()?` and walks the
+    /// wire-format leg array. All four helper methods
+    /// (`has_pending_domain_loss_barrier`, `kf_target_for_leg`,
+    /// `b_target_for_leg`, `clear_leg`) have matching signatures on this
+    /// `MarketGroupV16ViewMut` impl block, so the logic carries 1:1.
+    fn detach_solvent_active_legs_for_resolved_close(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        if account.header.pnl.get() < 0
+            || account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
+            return Ok(());
+        }
+        // Pre-check every active leg against `clear_leg`'s clearable shape.
+        // If any leg fails on a transient condition, fall through unchanged
+        // so the existing `active_bitmap_is_empty` gate returns ProgressOnly.
+        let configured_max = self.header.config.max_market_slots.get() as usize;
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if !leg.active {
+                continue;
+            }
+            if leg.b_stale || leg.stale {
+                return Ok(());
+            }
+            let asset_index = leg.asset_index as usize;
+            if asset_index >= configured_max {
+                return Err(V16Error::InvalidLeg);
+            }
+            if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+                return Ok(());
+            }
+            let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+            if k_target != leg.k_snap || f_target != leg.f_snap {
+                return Ok(());
+            }
+            if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
+                return Ok(());
+            }
+        }
+        // All clearable: detach in slot order.
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset_index = leg.asset_index as usize;
+                self.clear_leg(account, asset_index)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn deposit_not_atomic(
